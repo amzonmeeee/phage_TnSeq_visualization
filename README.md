@@ -1,82 +1,121 @@
 # Phage Tn-Seq Visualization Tool
 
-## Introduction
+**Pre-visualization** for phage transposon-sequencing (Tn-Seq / HIDDEN-seq) experiments.
 
-~~The **Phage Tn-Seq Visualization Tool** is a command-line or graphical tool for visualizing transposon sequencing data from phage experiments.~~
+Given a phage genome, this tool draws a **linear genome map** with gene arrows and
+the positions where a chosen transposon can insert — *before* any sequencing data is
+available. It is designed to fit naturally next to the
+[pharokka](https://github.com/gbouras13/pharokka) →
+[phold](https://github.com/gbouras13/phold) →
+[phynteny](https://github.com/susiegriggo/Phynteny_transformer) annotation pipeline,
+and reuses their PHROG functional-category colour scheme.
 
-~~This tool helps users inspect, analyze, and interpret Tn-Seq output data in a clear and reproducible way.~~
+> This is v0.1 (pre-visualization). Sequencing-data / essentiality overlays are planned
+> for a later version — the gene-arrow **fill** colour is reserved for that.
 
-## Overview
+## What it draws
 
-~~This repository contains the source code, installation instructions, usage examples, and documentation for the Phage Tn-Seq Visualization Tool.~~
+A horizontal genome line (length-scaled, in kb) with, per genome/contig:
 
-~~The tool is intended to help with:~~
+* **Gene / ORF arrows** — arrow direction shows strand.
+  * **Fill = essentiality** → drawn **black** for now (no sequencing data yet).
+  * **Border colour = PHROG functional category** (phold/pharokka colour scheme, with legend).
+  * De-novo ORFs (from an unannotated genome) get a **grey dashed border**.
+* **Insertion-site track** — short **red** ticks at every position the transposon can insert.
+* Optional **insertion-density** heat track (sites/kb, colour-mapped) to spot hot/cold zones.
+* Optional **GC content**, **GC skew**, and **tRNA/CRISPR** tracks.
+* Genome **name / accession** label (auto-detected or user-supplied).
 
-~~* Loading Tn-Seq input data~~
-~~* Processing or filtering sequencing results~~
-~~* Generating visualizations~~
-~~* Exporting plots or summary files~~
+## Inputs
+
+Two flavours of GenBank (`.gbk` / `.gb`) are accepted:
+
+1. **Annotated** — output of pharokka / phold / phynteny(_transformer). CDS `function`
+   qualifiers (PHROG categories) drive the border colours.
+2. **Plain / unannotated** — e.g. a GenBank download. ORFs are called de-novo with
+   [pyrodigal-gv](https://github.com/althonos/pyrodigal-gv) (the same viral gene caller
+   pharokka uses internally).
+
+## Built on existing tools (no reinvented wheels)
+
+| Job | Library |
+|-----|---------|
+| GenBank parsing | [Biopython](https://biopython.org) |
+| De-novo ORF calling | [pyrodigal-gv](https://github.com/althonos/pyrodigal-gv) |
+| Linear genome plotting | [pyGenomeViz](https://github.com/moshi4/pyGenomeViz) (same author as pyCirclize, which phold/pharokka use) |
+| Insertion-site scanning | Biopython + IUPAC motif regex |
 
 ## Installation
 
-Install the latest release using Homebrew:
+Pure `pip`, no conda/homebrew required (works on system Python ≥ 3.9):
 
 ```bash
-brew install <package-name>
+git clone <this-repo>
+cd phage_TnSeq_visualization
+pip install .
 ```
 
-Alternatively, download a release from the repository’s releases page and follow the platform-specific installation instructions.
+For development:
+
+```bash
+pip install -e ".[dev]"
+python examples/make_example.py   # generate synthetic test genomes
+pytest
+```
 
 ## Usage
 
-Run the tool from the command line:
+```bash
+phage-tnseq-viz INPUT.gbk -t mariner -o phage_map.png
+```
+
+### Transposon insertion preference
+
+`-t / --transposon` accepts either a **preset** or a **custom IUPAC motif**:
+
+| Preset | Motif |
+|--------|-------|
+| `mariner`, `himar1` | `TA` |
+| `tn5`, `tn10`, `tn7`, `mu` | ≈ random / site-specific (ticks skipped) |
 
 ```bash
-<command-name> [options] <input-file>
+phage-tnseq-viz genome.gbk -t mariner        # TA sites
+phage-tnseq-viz genome.gbk -t NTAN           # custom IUPAC motif
+phage-tnseq-viz genome.gbk -t TA --single-strand
 ```
 
-### Example
+### Common options
 
 ```bash
-<command-name> --input data/example.tsv --output results/
+# Extra tracks
+phage-tnseq-viz genome.gbk --insertion-density        # sites/kb heat track
+phage-tnseq-viz genome.gbk --gc-content --gc-skew --trna
+
+# Naming & legend
+phage-tnseq-viz genome.gbk --name "Phage vB_EcoM_XYZ"
+phage-tnseq-viz genome.gbk --no-legend
+
+# Output size / paper / format / transparency
+phage-tnseq-viz genome.gbk -o map.svg                     # SVG (vector)
+phage-tnseq-viz genome.gbk --paper a4 --fit-page          # fit A4 landscape
+phage-tnseq-viz genome.gbk --paper a3 --portrait
+phage-tnseq-viz genome.gbk --width 20 --track-height 2    # custom figure size
+phage-tnseq-viz genome.gbk --transparent --dpi 600
 ```
 
-### Input
-
-The input file should contain Tn-Seq data in a supported format, such as:
-
-```text
-<describe input format here>
-```
-
-Example input:
-
-```text
-asd
-```
+Run `phage-tnseq-viz --help` for the full list.
 
 ### Output
 
-The tool generates visualization files and/or processed output files.
+PNG (raster, `--dpi` configurable) or SVG (vector) — chosen by the output file
+extension. `--transparent` gives a transparent background for either.
 
-Example output:
+## Roadmap
 
-```text
-asd
-```
-
-## Citation
-
-If you use this tool in your work, please cite:
-
-```text
-asd
-```
+* Overlay real Tn-Seq read counts → colour arrow **fill** by gene essentiality.
+* Per-insertion-site read-count heat track.
+* Multi-genome comparison / alignment view.
 
 ## License
 
-This project is licensed under:
-
-```text
-asd
-```
+See [LICENSE](LICENSE).

@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.eggs/
+.pytest_cache/
+.venv/
+venv/
+
+# Example folder & generated outputs
+examples/
+*.png
+*.svg
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+
+# Personal notes (not for git)
+專案結構說明.md
