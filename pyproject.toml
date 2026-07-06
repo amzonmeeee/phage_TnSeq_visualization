@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "phage-tnseq-viz"
+version = "0.1.0"
+description = "Pre-visualization tool for phage Tn-Seq (HIDDEN-seq): linear phage genome maps with gene arrows and transposon insertion sites."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { file = "LICENSE" }
+authors = [{ name = "Jensen F." }]
+keywords = ["phage", "tn-seq", "transposon", "genome", "visualization", "pharokka", "phold", "phynteny"]
+
+dependencies = [
+    "biopython>=1.80",
+    "pygenomeviz>=1.0",
+    "matplotlib>=3.5",
+    "pyrodigal-gv>=0.3",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[project.scripts]
+phage-tnseq-viz = "phage_tnseq_viz.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+phage_tnseq_viz = ["py.typed"]
