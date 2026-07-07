@@ -78,6 +78,53 @@ def test_category_color_unknown_falls_back():
     assert colors.category_color("nonsense") == colors.PHROG_COLORS["unknown function"]
 
 
+def test_infer_category_from_product():
+    inf = colors.infer_category_from_product
+    assert inf("terminase large subunit") == "head and packaging"
+    assert inf("tail fiber protein") == "tail"
+    assert inf("DNA modification methylase") == "dna, rna and nucleotide metabolism"
+    assert inf("phage integrase") == "integration and excision"
+    assert inf("endolysin") == "lysis"
+    assert inf("hypothetical protein") == "unknown function"
+    assert inf("head-tail adaptor") == "connector"
+    assert inf(None) is None
+    assert inf("some totally novel widget") is None
+
+
+# ---- line wrapping --------------------------------------------------------
+
+def test_row_windows_wraps_and_balances():
+    from phage_tnseq_viz.plot import _row_windows
+
+    # default 20 kb wrap on a 39,422 bp phage -> 2 evenly balanced rows
+    rows = _row_windows(39422, 20.0, None)
+    assert len(rows) == 2
+    assert rows[0][0] == 0 and rows[-1][1] == 39422
+    # contiguous coverage, no gaps or overlaps
+    for a, b in zip(rows, rows[1:]):
+        assert a[1] == b[0]
+    # balanced: row widths differ by at most 1 bp
+    widths = [e - s for s, e in rows]
+    assert max(widths) - min(widths) <= 1
+
+
+def test_row_windows_single_line_cases():
+    from phage_tnseq_viz.plot import _row_windows
+
+    # short genome stays on one line under the default wrap width
+    assert _row_windows(5000, 20.0, None) == [(0, 5000)]
+    # wrap disabled -> single line regardless of length
+    assert _row_windows(60000, 0.0, None) == [(0, 60000)]
+
+
+def test_row_windows_force_rows_overrides():
+    from phage_tnseq_viz.plot import _row_windows
+
+    rows = _row_windows(30000, 20.0, 3)
+    assert len(rows) == 3
+    assert rows[0][0] == 0 and rows[-1][1] == 30000
+
+
 # ---- genome loading -------------------------------------------------------
 
 @pytest.fixture(scope="module", autouse=True)

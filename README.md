@@ -15,7 +15,10 @@ and reuses their PHROG functional-category colour scheme.
 
 ## What it draws
 
-A horizontal genome line (length-scaled, in kb) with, per genome/contig:
+A horizontal genome line (length-scaled, in kb) that **wraps onto multiple rows**
+(≈ every 20 kb by default, evenly balanced) so both short and long genomes stay
+paper-friendly — tune with `--wrap-kb`, force a row count with `--rows`, or draw a
+single line with `--no-wrap`. Per genome/contig it shows:
 
 * **Gene / ORF arrows** — arrow direction shows strand.
   * **Fill = essentiality** → drawn **black** for now (no sequencing data yet).
@@ -36,7 +39,7 @@ Two flavours of GenBank (`.gbk` / `.gb`) are accepted:
    [pyrodigal-gv](https://github.com/althonos/pyrodigal-gv) (the same viral gene caller
    pharokka uses internally).
 
-## Built on existing tools (no reinvented wheels)
+## Built on existing tools
 
 | Job | Library |
 |-----|---------|
@@ -45,7 +48,7 @@ Two flavours of GenBank (`.gbk` / `.gb`) are accepted:
 | Linear genome plotting | [pyGenomeViz](https://github.com/moshi4/pyGenomeViz) (same author as pyCirclize, which phold/pharokka use) |
 | Insertion-site scanning | Biopython + IUPAC motif regex |
 
-## Installation
+## Installation (pending review)
 
 Pure `pip`, no conda/homebrew required (works on system Python ≥ 3.9):
 
@@ -78,6 +81,7 @@ phage-tnseq-viz INPUT.gbk -t mariner -o phage_map.png
 | `mariner`, `himar1` | `TA` |
 | `tn5`, `tn10`, `tn7`, `mu` | ≈ random / site-specific (ticks skipped) |
 
+E.g.
 ```bash
 phage-tnseq-viz genome.gbk -t mariner        # TA sites
 phage-tnseq-viz genome.gbk -t NTAN           # custom IUPAC motif
@@ -94,6 +98,12 @@ phage-tnseq-viz genome.gbk --gc-content --gc-skew --trna
 # Naming & legend
 phage-tnseq-viz genome.gbk --name "Phage vB_EcoM_XYZ"
 phage-tnseq-viz genome.gbk --no-legend
+
+# Line wrapping (multi-row layout for papers)
+phage-tnseq-viz genome.gbk                       # auto-wrap ~every 20 kb
+phage-tnseq-viz genome.gbk --wrap-kb 10          # new row about every 10 kb
+phage-tnseq-viz genome.gbk --rows 3              # force exactly 3 rows
+phage-tnseq-viz genome.gbk --no-wrap             # single long line
 
 # Output size / paper / format / transparency
 phage-tnseq-viz genome.gbk -o map.svg                     # SVG (vector)
@@ -115,6 +125,9 @@ extension. `--transparent` gives a transparent background for either.
 * Overlay real Tn-Seq read counts → colour arrow **fill** by gene essentiality.
 * Per-insertion-site read-count heat track.
 * Multi-genome comparison / alignment view.
+
+## Citation
+blahblah
 
 ## License
 
