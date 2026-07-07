@@ -36,7 +36,7 @@ Two flavours of GenBank (`.gbk` / `.gb`) are accepted:
    [pyrodigal-gv](https://github.com/althonos/pyrodigal-gv) (the same viral gene caller
    pharokka uses internally).
 
-## Built on existing tools (no reinvented wheels)
+## Built on existing tools
 
 | Job | Library |
 |-----|---------|
@@ -115,6 +115,9 @@ extension. `--transparent` gives a transparent background for either.
 * Overlay real Tn-Seq read counts → colour arrow **fill** by gene essentiality.
 * Per-insertion-site read-count heat track.
 * Multi-genome comparison / alignment view.
+
+## Citation
+blahblah
 
 ## License
 
