@@ -67,7 +67,14 @@ def build_parser() -> argparse.ArgumentParser:
     g_out.add_argument("--width", type=float, default=15.0,
                        help="Figure width in inches (ignored if --paper is set).")
     g_out.add_argument("--track-height", type=float, default=1.6,
-                       help="Height per genome track in inches.")
+                       help="Height per genome track (row) in inches.")
+    g_out.add_argument("--wrap-kb", type=float, default=20.0,
+                       help="Wrap the genome onto a new row about every N kb "
+                            "(rows are evenly balanced). 0 = single line.")
+    g_out.add_argument("--rows", type=int, default=None,
+                       help="Force an exact number of rows (overrides --wrap-kb).")
+    g_out.add_argument("--no-wrap", action="store_true",
+                       help="Draw the whole genome on a single line.")
     g_out.add_argument("--dpi", type=int, default=300, help="Raster resolution for PNG.")
     g_out.add_argument("--transparent", action="store_true",
                        help="Transparent background (PNG/SVG).")
@@ -124,6 +131,8 @@ def main(argv: list[str] | None = None) -> int:
         paper=args.paper,
         portrait=args.portrait,
         fit_page=args.fit_page,
+        wrap_kb=0.0 if args.no_wrap else args.wrap_kb,
+        force_rows=args.rows,
         dpi=args.dpi,
         transparent=args.transparent,
         show_insertion_sites=draw_insertions,

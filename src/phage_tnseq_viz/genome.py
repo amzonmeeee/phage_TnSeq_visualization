@@ -16,6 +16,7 @@ from pathlib import Path
 from Bio import SeqIO
 from Bio.SeqRecord import SeqRecord
 
+from .colors import infer_category_from_product
 from .tracks import NonCdsFeature, extract_noncds_features
 
 
@@ -67,7 +68,13 @@ def _extract_annotated_genes(record: SeqRecord) -> list[Gene]:
         strand = 1 if (feat.location.strand or 1) >= 0 else -1
         function = _get_qual(feat, "function")
         product = _get_qual(feat, "product")
-        locus = _get_qual(feat, "locus_tag") or _get_qual(feat, "ID")
+        # Files that carry only /product (NCBI downloads, or a phold/phynteny
+        # file round-tripped through Benchling, which strips /function): recover
+        # the PHROG category from the product text so arrows are still coloured.
+        if function is None:
+            function = infer_category_from_product(product)
+        locus = (_get_qual(feat, "locus_tag") or _get_qual(feat, "ID")
+                 or _get_qual(feat, "label"))
         is_hit = any(
             k in feat.qualifiers or _get_qual(feat, k) for k in _VFDB_AMR_KEYS
         )

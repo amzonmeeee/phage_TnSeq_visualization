@@ -91,14 +91,13 @@ def compute_insertion_density(
     track = WindowTrack()
     half = window // 2
     for start in range(0, length, step):
-        end = min(start + window, length)
-        w = end - start
-        if w <= 0:
-            continue
-        # count sites in (start, end]  (1-based sites)
-        count = bisect_right(sites, end) - bisect_right(sites, start)
-        track.positions.append(start + half + 1)
-        track.values.append(count / w * 1000.0)  # per kb
+        # Fixed-width window; the final window near the 3' end may run past
+        # `length` but is still normalised by the full window width so short
+        # trailing bins do not inflate into a spurious density spike.
+        end = start + window
+        count = bisect_right(sites, min(end, length)) - bisect_right(sites, start)
+        track.positions.append(min(start + half + 1, length))
+        track.values.append(count / window * 1000.0)  # per kb
     return track
 
 
