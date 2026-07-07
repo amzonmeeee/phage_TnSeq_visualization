@@ -1,6 +1,6 @@
 # Phage Tn-Seq Visualization Tool
 
-**Pre-visualization** for phage transposon-sequencing (Tn-Seq / HIDDEN-seq) experiments.
+**Pre-visualization** for phage transposon-sequencing (Tn-Seq / HIDEN-seq) experiments.
 
 Given a phage genome, this tool draws a **linear genome map** with gene arrows and
 the positions where a chosen transposon can insert — *before* any sequencing data is
