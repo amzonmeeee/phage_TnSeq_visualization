@@ -44,11 +44,19 @@ SKEW_POSITIVE = "#2ca02c" # green
 SKEW_NEGATIVE = "#8900ff" # purple
 TRNA_COLOR = "#111111"
 
-# Height of a gene arrow's shaft relative to the full track lane. A gene clipped
-# at a wrap boundary (the piece without the arrowhead) is drawn as a plain
-# rectangle at exactly this height so it matches the neighbouring arrow bodies
-# instead of the taller full-height box pyGenomeViz would otherwise draw.
-ARROW_SHAFT_RATIO = 0.5
+# Gene arrow shaft height relative to the full track lane. 1.0 gives a "pentagon"
+# arrow: a full-height body ending in a triangular point (home-plate shape), as
+# opposed to the classic thin-tailed arrow. A gene clipped at a wrap boundary (the
+# piece without the point) is drawn as a plain rectangle at exactly this height so
+# it matches the neighbouring arrow bodies.
+ARROW_SHAFT_RATIO = 1.0
+
+# Sub-track heights relative to the gene-arrow lane (1.0 = same thickness as the
+# arrows). The insertion ticks are matched to the arrow height on purpose so the
+# arrows read as slim bars rather than a dominating block.
+INSERTION_TRACK_RATIO = 1.0
+DENSITY_TRACK_RATIO = 1.15
+GC_TRACK_RATIO = 1.1
 
 
 @dataclass
@@ -159,7 +167,7 @@ def render(
         # Wrapped rows are stacked feature tracks; pyGenomeViz would otherwise
         # insert a full-height "link" band between them (meant for genome-to-genome
         # alignment ribbons). Shrink it to a thin inter-row gap.
-        link_track_ratio=0.12,
+        link_track_ratio=0.20,
     )
 
     # Pre-compute the whole-genome window signals (pure numeric, no axes needed).
@@ -176,11 +184,11 @@ def render(
             density_signal[rec.accession] = (wt, max(wt.values, default=0.0))
         if options.show_gc_content:
             win = options.gc_window or _default_window(rec.length)
-            wt = compute_gc_content(rec.sequence, win, max(1, win // 2))
+            wt = compute_gc_content(rec.sequence, win, _gc_step(win))
             gcc_signal[rec.accession] = (wt, max((abs(v) for v in wt.values), default=1.0) or 1.0)
         if options.show_gc_skew:
             win = options.gc_window or _default_window(rec.length)
-            wt = compute_gc_skew(rec.sequence, win, max(1, win // 2))
+            wt = compute_gc_skew(rec.sequence, win, _gc_step(win))
             gcs_signal[rec.accession] = (wt, max((abs(v) for v in wt.values), default=1.0) or 1.0)
 
     # Keep references (keyed by genome + row index) so we can draw on the
@@ -257,19 +265,19 @@ def render(
 
             if options.show_insertion_sites and insertion_sites.get(rec.accession):
                 insertion_subtracks[key] = track.add_subtrack(
-                    f"ins:{rec.accession}:{idx}", ratio=0.35, ylim=(0, 1)
+                    f"ins:{rec.accession}:{idx}", ratio=INSERTION_TRACK_RATIO, ylim=(0, 1)
                 )
             if rec.accession in density_signal:
                 density_subtracks[key] = track.add_subtrack(
-                    f"dens:{rec.accession}:{idx}", ratio=0.45, ylim=(0, 1)
+                    f"dens:{rec.accession}:{idx}", ratio=DENSITY_TRACK_RATIO, ylim=(0, 1)
                 )
             if options.show_gc_content:
                 gc_content_subtracks[key] = track.add_subtrack(
-                    f"gcc:{rec.accession}:{idx}", ratio=0.6, ylim=(-1, 1)
+                    f"gcc:{rec.accession}:{idx}", ratio=GC_TRACK_RATIO, ylim=(-1, 1)
                 )
             if options.show_gc_skew:
                 gc_skew_subtracks[key] = track.add_subtrack(
-                    f"gcs:{rec.accession}:{idx}", ratio=0.6, ylim=(-1, 1)
+                    f"gcs:{rec.accession}:{idx}", ratio=GC_TRACK_RATIO, ylim=(-1, 1)
                 )
 
     gv.set_scale_xticks(labelsize=10)
@@ -345,6 +353,12 @@ def render(
 
 def _default_window(length: int) -> int:
     return max(100, length // 100)
+
+
+def _gc_step(window: int) -> int:
+    """Sliding step for GC tracks — a small fraction of the window so the curve is
+    finely sampled and smooth (phold-style) rather than coarsely polygonal."""
+    return max(1, window // 10)
 
 
 def _draw_window_row(sub, wt: WindowTrack, vmax: float, window, pos_c, neg_c) -> None:
@@ -428,7 +442,7 @@ def _decorate(fig, records, options, *, present_categories, include_vfdb,
                             linewidth=1.6, linestyle="--"))
         gene_l.append("De-novo ORF (unannotated)")
 
-    # Transposon + sequence-track legend (kept in its own box).
+    # Transposon legend (its own box).
     tn_h: list = []
     tn_l: list[str] = []
     if options.show_insertion_sites:
@@ -436,24 +450,38 @@ def _decorate(fig, records, options, *, present_categories, include_vfdb,
         tn_h.append(Line2D([0], [0], color=options.insertion_color, lw=1.6))
         tn_l.append(lbl)
     tn_h.append(Patch(facecolor="black", edgecolor="#000000", linewidth=1.0))
-    tn_l.append("Gene fill = essentiality (N/A — no Tn-Seq data yet)")
-    if options.show_gc_content:
-        tn_h.append(Patch(facecolor=GC_POSITIVE)); tn_l.append("GC content > genome mean")
-        tn_h.append(Patch(facecolor=GC_NEGATIVE)); tn_l.append("GC content < genome mean")
-    if options.show_gc_skew:
-        tn_h.append(Patch(facecolor=SKEW_POSITIVE)); tn_l.append("GC skew +  (G > C)")
-        tn_h.append(Patch(facecolor=SKEW_NEGATIVE)); tn_l.append("GC skew −  (C > G)")
-    if options.show_trna:
-        tn_h.append(Patch(facecolor=TRNA_COLOR)); tn_l.append("tRNA / tmRNA / CRISPR")
+    tn_l.append("Gene fill = essentiality (no data yet)")
 
-    want_legend = options.show_legend and (gene_h or tn_h)
+    # Sequence-track legend (its own box).
+    seq_h: list = []
+    seq_l: list[str] = []
+    if options.show_gc_content:
+        seq_h.append(Patch(facecolor=GC_POSITIVE)); seq_l.append("GC content > genome mean")
+        seq_h.append(Patch(facecolor=GC_NEGATIVE)); seq_l.append("GC content < genome mean")
+    if options.show_gc_skew:
+        seq_h.append(Patch(facecolor=SKEW_POSITIVE)); seq_l.append("GC skew +  (G > C)")
+        seq_h.append(Patch(facecolor=SKEW_NEGATIVE)); seq_l.append("GC skew −  (C > G)")
+    if options.show_trna:
+        seq_h.append(Patch(facecolor=TRNA_COLOR)); seq_l.append("tRNA / tmRNA / CRISPR")
+
+    # Each non-empty group becomes its own framed box; boxes are then spread evenly.
+    boxes: list[tuple[str, list, list, int]] = []
+    if gene_h:
+        boxes.append(("Gene function — PHROG category", gene_h, gene_l,
+                      2 if len(gene_h) > 4 else 1))
+    if tn_h:
+        boxes.append(("Transposon", tn_h, tn_l, 1))
+    if seq_h:
+        boxes.append(("Sequence tracks", seq_h, seq_l, 1))
+
+    want_legend = options.show_legend and bool(boxes)
     show_cbar = density_mappable is not None
 
     # Reserve top/bottom margins. pyGenomeViz hangs the kb ruler a *height-scaled*
     # distance below the lowest track, so budget the ruler as a fraction of height
     # and then measure where it actually ends before placing the legends.
     height = fig.get_size_inches()[1]
-    top_in = 0.62 if big else 0.10
+    top_in = 0.90 if big else 0.10
     ruler_in = 0.11 * height + 0.15
     legend_in = 1.35 if want_legend else 0.0
     cbar_in = 0.60 if show_cbar else 0.0
@@ -463,8 +491,8 @@ def _decorate(fig, records, options, *, present_categories, include_vfdb,
     _compress_axes(fig, top_in, bottom_in)
 
     if big:
-        fig.suptitle(rec.name, y=1 - 0.26 / height, fontsize=16, fontweight="bold")
-        fig.text(0.5, 1 - 0.52 / height, f"{rec.accession} · {rec.length:,} bp",
+        fig.suptitle(rec.name, y=1 - 0.30 / height, fontsize=16, fontweight="bold")
+        fig.text(0.5, 1 - 0.58 / height, f"{rec.accession} · {rec.length:,} bp",
                  ha="center", va="top", fontsize=10.5, color="#555555")
 
     if show_cbar:
@@ -476,17 +504,14 @@ def _decorate(fig, records, options, *, present_categories, include_vfdb,
     if want_legend:
         legend_top = _ruler_bottom_frac(fig, fallback=(cbar_in + legend_in) / height) - 0.01
         common = dict(frameon=True, fontsize=8, borderpad=0.8, labelspacing=0.6,
-                      title_fontsize=9.5)
-        if gene_h:
+                      columnspacing=1.1, handlelength=1.4, title_fontsize=9.5)
+        # Spread the boxes evenly across the width, all top-aligned under the ruler.
+        n = len(boxes)
+        for i, (title, handles, labels, ncol) in enumerate(boxes):
+            x = 0.04 + (i + 0.5) / n * 0.92
             leg = fig.legend(
-                gene_h, gene_l, loc="upper left", bbox_to_anchor=(0.02, legend_top),
-                ncol=2, title="Gene function — PHROG category", **common,
-            )
-            leg.get_frame().set_edgecolor("#999999")
-        if tn_h:
-            leg = fig.legend(
-                tn_h, tn_l, loc="upper right", bbox_to_anchor=(0.98, legend_top),
-                ncol=1, title="Transposon & sequence tracks", **common,
+                handles, labels, loc="upper center", bbox_to_anchor=(x, legend_top),
+                ncol=ncol, title=title, **common,
             )
             leg.get_frame().set_edgecolor("#999999")
 
