@@ -78,6 +78,8 @@ class PlotOptions:
     insertion_color: str = "#e50000"
     gene_fill: str = "#000000"       # essentiality placeholder
     show_legend: bool = True
+    big_title: bool = True           # genome name as a big heading on top
+                                     # (False = small label beside the first row)
 
 
 def _gene_edge(gene) -> tuple[str, str]:
@@ -120,7 +122,12 @@ def _fmt_kb_range(r0: int, r1: int) -> str:
     return f"{r0 / 1000:g}–{r1 / 1000:g} kb"
 
 
-def _row_label(rec: GenomeRecord, idx: int, r0: int, r1: int, n_rows: int) -> str:
+def _row_label(rec: GenomeRecord, idx: int, r0: int, r1: int, n_rows: int,
+               big_title: bool) -> str:
+    # With a big top title the genome identity lives in the heading, so the rows
+    # only carry their kb range (nothing at all when there is a single row).
+    if big_title:
+        return "" if n_rows == 1 else _fmt_kb_range(r0, r1)
     ident = f"{rec.name}\n{rec.accession} | {rec.length:,} bp"
     if n_rows == 1:
         return ident
@@ -200,7 +207,8 @@ def render(
             # Left-aligned segment spanning this row's true coordinate window; all
             # rows share one bp-per-inch scale so a shorter last row ends early.
             track = gv.add_feature_track(
-                _row_label(rec, idx, r0, r1, n_rows), (r0, r1), labelsize=11
+                _row_label(rec, idx, r0, r1, n_rows, options.big_title),
+                (r0, r1), labelsize=11,
             )
             row_tracks[key] = track
             seg = track.get_segment()
@@ -311,34 +319,14 @@ def render(
         wt, vmax = gcs_signal[acc]
         _draw_window_row(sub, wt, vmax, row_window[key], SKEW_POSITIVE, SKEW_NEGATIVE)
 
-    if options.show_legend:
-        _add_legend(
-            fig, present_categories,
-            include_vfdb=any_vfdb, include_denovo=any_denovo,
-            show_insertion=options.show_insertion_sites,
-            insertion_color=options.insertion_color,
-            transposon_label=transposon_label,
-        )
-
-    if density_mappable is not None:
-        # Reserve the colorbar strip by hand. Using fig.colorbar(ax=fig.axes)
-        # steals space *unevenly* from the stacked track axes (the heatmap axis
-        # ends up narrower than the gene-arrow axis), which leaves the density
-        # heatmap short of the genome's 3' end. Shrinking every track axis to the
-        # same right edge and placing the colorbar beside them keeps all tracks
-        # left- and right-aligned.
-        track_axes = list(fig.axes)
-        right = max(ax.get_position().x1 for ax in track_axes)
-        new_x1 = right - 0.05
-        for ax in track_axes:
-            bb = ax.get_position()
-            ax.set_position([bb.x0, bb.y0, new_x1 - bb.x0, bb.height])
-        y0 = min(ax.get_position().y0 for ax in track_axes)
-        y1 = max(ax.get_position().y1 for ax in track_axes)
-        cax = fig.add_axes([new_x1 + 0.012, y0, 0.012, y1 - y0])
-        cbar = fig.colorbar(density_mappable, cax=cax)
-        cbar.set_label("Insertion sites / kb", fontsize=8)
-        cbar.ax.tick_params(labelsize=7)
+    # ---- title, legends and colorbar, all kept off to the top/bottom margins ----
+    _decorate(
+        fig, records, options,
+        present_categories=present_categories,
+        include_vfdb=any_vfdb, include_denovo=any_denovo,
+        transposon_label=transposon_label,
+        density_mappable=density_mappable,
+    )
 
     if options.paper and options.fit_page:
         pw, ph = PAPER_SIZES[options.paper]
@@ -394,34 +382,131 @@ def _draw_density_row(sub, wt: WindowTrack, vmax: float, window, *, cmap):
     return im
 
 
-def _add_legend(fig, categories, *, include_vfdb, include_denovo,
-                show_insertion, insertion_color, transposon_label):
+def _compress_axes(fig, top_in: float, bottom_in: float) -> tuple[float, float]:
+    """Squeeze every existing axis into the vertical band [bottom, 1-top].
+
+    Frees ``top_in`` / ``bottom_in`` inches at the figure edges for a title and a
+    legend/colorbar strip, keeping the tracks' relative proportions intact.
+    Returns the freed margins as figure fractions ``(bottom, top)``.
+    """
+    height = fig.get_size_inches()[1]
+    t = top_in / height
+    b = bottom_in / height
+    span = max(1e-3, 1.0 - t - b)
+    # Read every current position first, then apply — some axes are position-linked
+    # (the scale ruler is a twin of the lowest track), so reading a position after
+    # a sibling was moved would compound the shift.
+    targets = [
+        (ax, ax.get_position()) for ax in fig.axes
+    ]
+    for ax, p in targets:
+        ax.set_position([p.x0, b + p.y0 * span, p.width, p.height * span])
+    return b, t
+
+
+def _decorate(fig, records, options, *, present_categories, include_vfdb,
+              include_denovo, transposon_label, density_mappable):
+    """Add the top title plus framed legend boxes and a density colorbar below.
+
+    All decorations live in reserved top/bottom margins (never beside the plot),
+    and the gene-function legend is kept separate from the transposon/track one.
+    """
     from matplotlib.lines import Line2D
     from matplotlib.patches import Patch
 
-    handles: list = []
-    labels: list[str] = []
-    for label, color in colors.legend_entries(categories, include_vfdb=include_vfdb):
-        handles.append(Patch(facecolor="black", edgecolor=color, linewidth=1.6))
-        labels.append(label)
-    if include_denovo:
-        handles.append(Patch(facecolor="black", edgecolor=colors.UNANNOTATED_EDGE,
-                             linewidth=1.6, linestyle="--"))
-        labels.append("De-novo ORF (unannotated)")
-    if show_insertion:
-        lbl = "Insertion site"
-        if transposon_label:
-            lbl += f" ({transposon_label})"
-        handles.append(Line2D([0], [0], color=insertion_color, lw=1.5))
-        labels.append(lbl)
+    rec = records[0]
+    big = options.big_title
 
-    if not handles:
-        return
-    ncol = min(4, len(handles))
-    fig.legend(
-        handles, labels,
-        loc="upper center", bbox_to_anchor=(0.5, 0.0),
-        ncol=ncol, frameon=False, fontsize=9,
-        title="Gene border = PHROG category   |   fill = essentiality (black = N/A)",
-        title_fontsize=9,
-    )
+    # Gene-function (PHROG category) legend — border colour = category.
+    gene_h: list = []
+    gene_l: list[str] = []
+    for label, color in colors.legend_entries(present_categories, include_vfdb=include_vfdb):
+        gene_h.append(Patch(facecolor="black", edgecolor=color, linewidth=1.6))
+        gene_l.append(label)
+    if include_denovo:
+        gene_h.append(Patch(facecolor="black", edgecolor=colors.UNANNOTATED_EDGE,
+                            linewidth=1.6, linestyle="--"))
+        gene_l.append("De-novo ORF (unannotated)")
+
+    # Transposon + sequence-track legend (kept in its own box).
+    tn_h: list = []
+    tn_l: list[str] = []
+    if options.show_insertion_sites:
+        lbl = "Insertion site" + (f" ({transposon_label})" if transposon_label else "")
+        tn_h.append(Line2D([0], [0], color=options.insertion_color, lw=1.6))
+        tn_l.append(lbl)
+    tn_h.append(Patch(facecolor="black", edgecolor="#000000", linewidth=1.0))
+    tn_l.append("Gene fill = essentiality (N/A — no Tn-Seq data yet)")
+    if options.show_gc_content:
+        tn_h.append(Patch(facecolor=GC_POSITIVE)); tn_l.append("GC content > genome mean")
+        tn_h.append(Patch(facecolor=GC_NEGATIVE)); tn_l.append("GC content < genome mean")
+    if options.show_gc_skew:
+        tn_h.append(Patch(facecolor=SKEW_POSITIVE)); tn_l.append("GC skew +  (G > C)")
+        tn_h.append(Patch(facecolor=SKEW_NEGATIVE)); tn_l.append("GC skew −  (C > G)")
+    if options.show_trna:
+        tn_h.append(Patch(facecolor=TRNA_COLOR)); tn_l.append("tRNA / tmRNA / CRISPR")
+
+    want_legend = options.show_legend and (gene_h or tn_h)
+    show_cbar = density_mappable is not None
+
+    # Reserve top/bottom margins. pyGenomeViz hangs the kb ruler a *height-scaled*
+    # distance below the lowest track, so budget the ruler as a fraction of height
+    # and then measure where it actually ends before placing the legends.
+    height = fig.get_size_inches()[1]
+    top_in = 0.62 if big else 0.10
+    ruler_in = 0.11 * height + 0.15
+    legend_in = 1.35 if want_legend else 0.0
+    cbar_in = 0.60 if show_cbar else 0.0
+    bottom_in = 0.0
+    if want_legend or show_cbar:
+        bottom_in = ruler_in + legend_in + cbar_in + 0.10
+    _compress_axes(fig, top_in, bottom_in)
+
+    if big:
+        fig.suptitle(rec.name, y=1 - 0.26 / height, fontsize=16, fontweight="bold")
+        fig.text(0.5, 1 - 0.52 / height, f"{rec.accession} · {rec.length:,} bp",
+                 ha="center", va="top", fontsize=10.5, color="#555555")
+
+    if show_cbar:
+        cax = fig.add_axes([0.34, 0.30 / height, 0.32, 0.14 / height])
+        cbar = fig.colorbar(density_mappable, cax=cax, orientation="horizontal")
+        cbar.set_label("Insertion density (sites / kb)", fontsize=8.5)
+        cbar.ax.tick_params(labelsize=7.5)
+
+    if want_legend:
+        legend_top = _ruler_bottom_frac(fig, fallback=(cbar_in + legend_in) / height) - 0.01
+        common = dict(frameon=True, fontsize=8, borderpad=0.8, labelspacing=0.6,
+                      title_fontsize=9.5)
+        if gene_h:
+            leg = fig.legend(
+                gene_h, gene_l, loc="upper left", bbox_to_anchor=(0.02, legend_top),
+                ncol=2, title="Gene function — PHROG category", **common,
+            )
+            leg.get_frame().set_edgecolor("#999999")
+        if tn_h:
+            leg = fig.legend(
+                tn_h, tn_l, loc="upper right", bbox_to_anchor=(0.98, legend_top),
+                ncol=1, title="Transposon & sequence tracks", **common,
+            )
+            leg.get_frame().set_edgecolor("#999999")
+
+
+def _ruler_bottom_frac(fig, fallback: float) -> float:
+    """Figure-fraction y of the bottom of the kb scale labels (below the tracks).
+
+    Legends are anchored just under this so they never collide with the ruler,
+    which pyGenomeViz places a height-dependent distance below the lowest track.
+    """
+    try:
+        fig.canvas.draw()
+        best = None
+        for ax in fig.axes:
+            labels = [t for t in ax.get_xticklabels()
+                      if t.get_text().strip() and "b" in t.get_text().lower()]
+            if not labels:
+                continue
+            y0 = min(t.get_window_extent().y0 for t in labels) / fig.bbox.height
+            best = y0 if best is None else min(best, y0)
+        return best if best is not None else fallback
+    except Exception:  # pragma: no cover - measurement is best-effort
+        return fallback
