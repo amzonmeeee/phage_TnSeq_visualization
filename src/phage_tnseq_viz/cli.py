@@ -47,6 +47,9 @@ def build_parser() -> argparse.ArgumentParser:
     g_name.add_argument("--no-orf-finder", action="store_true",
                         help="Do not call ORFs de-novo when the GenBank has no CDS.")
     g_name.add_argument("--no-legend", action="store_true", help="Hide the legend.")
+    g_name.add_argument("--small-title", action="store_true",
+                        help="Show the genome name as a small label beside the first "
+                             "row instead of a big heading on top.")
 
     g_tracks = p.add_argument_group("optional tracks")
     g_tracks.add_argument("--gc-content", action="store_true",
@@ -133,6 +136,7 @@ def main(argv: list[str] | None = None) -> int:
         fit_page=args.fit_page,
         wrap_kb=0.0 if args.no_wrap else args.wrap_kb,
         force_rows=args.rows,
+        big_title=not args.small_title,
         dpi=args.dpi,
         transparent=args.transparent,
         show_insertion_sites=draw_insertions,

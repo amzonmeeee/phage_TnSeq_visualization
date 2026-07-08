@@ -97,6 +97,7 @@ phage-tnseq-viz genome.gbk --gc-content --gc-skew --trna
 
 # Naming & legend
 phage-tnseq-viz genome.gbk --name "Phage vB_EcoM_XYZ"
+phage-tnseq-viz genome.gbk --small-title          # name as a small side label, not a heading
 phage-tnseq-viz genome.gbk --no-legend
 
 # Line wrapping (multi-row layout for papers)
