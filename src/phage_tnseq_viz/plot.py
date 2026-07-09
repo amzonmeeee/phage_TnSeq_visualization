@@ -56,14 +56,22 @@ ARROW_SHAFT_RATIO = 1.0
 # arrows read as slim bars rather than a dominating block.
 INSERTION_TRACK_RATIO = 1.0
 DENSITY_TRACK_RATIO = 1.15
-GC_TRACK_RATIO = 1.1
+# GC content/skew are kept at their previous absolute height while the arrow lane
+# was halved, so their ratio (relative to the now-thin arrow lane) is doubled.
+GC_TRACK_RATIO = 2.3
+
+# Gene-arrow lane height (pyGenomeViz feature_track_ratio). Halved from the 0.25
+# default so the arrow / insertion / density lanes read as slim bars.
+FEATURE_TRACK_RATIO = 0.125
+# Gene arrow border line width.
+GENE_EDGE_WIDTH = 4.95
 
 
 @dataclass
 class PlotOptions:
     # figure sizing
     fig_width: float = 15.0
-    track_height: float = 1.6
+    track_height: float = 0.93
     paper: str | None = None
     portrait: bool = False
     fit_page: bool = False
@@ -164,10 +172,11 @@ def render(
         fig_width=fig_width,
         fig_track_height=options.track_height,
         track_align_type="left",
+        feature_track_ratio=FEATURE_TRACK_RATIO,
         # Wrapped rows are stacked feature tracks; pyGenomeViz would otherwise
         # insert a full-height "link" band between them (meant for genome-to-genome
         # alignment ribbons). Shrink it to a thin inter-row gap.
-        link_track_ratio=0.20,
+        link_track_ratio=0.10,
     )
 
     # Pre-compute the whole-genome window signals (pure numeric, no axes needed).
@@ -246,7 +255,7 @@ def render(
                         arrow_shaft_ratio=ARROW_SHAFT_RATIO,
                         fc=options.gene_fill,
                         ec=edge,
-                        lw=1.1,
+                        lw=GENE_EDGE_WIDTH,
                         linestyle=ls,
                     )
                 else:
@@ -280,7 +289,7 @@ def render(
                     f"gcs:{rec.accession}:{idx}", ratio=GC_TRACK_RATIO, ylim=(-1, 1)
                 )
 
-    gv.set_scale_xticks(labelsize=10)
+    gv.set_scale_xticks(labelsize=10, ymargin=0.3)
     fig = gv.plotfig()
 
     # ---- truncated gene bodies: flat shaft-height rectangles at wrap cuts ----
@@ -298,7 +307,7 @@ def render(
                 Rectangle(
                     (x0, cy - h / 2.0), x1 - x0, h,
                     facecolor=options.gene_fill, edgecolor=edge,
-                    linewidth=1.1, linestyle=ls, joinstyle="miter", zorder=3,
+                    linewidth=GENE_EDGE_WIDTH, linestyle=ls, joinstyle="miter", zorder=3,
                 )
             )
 
@@ -482,7 +491,7 @@ def _decorate(fig, records, options, *, present_categories, include_vfdb,
     # and then measure where it actually ends before placing the legends.
     height = fig.get_size_inches()[1]
     top_in = 0.90 if big else 0.10
-    ruler_in = 0.11 * height + 0.15
+    ruler_in = 0.04 * height + 0.15
     legend_in = 1.35 if want_legend else 0.0
     cbar_in = 0.60 if show_cbar else 0.0
     bottom_in = 0.0

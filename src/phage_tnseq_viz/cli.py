@@ -69,7 +69,7 @@ def build_parser() -> argparse.ArgumentParser:
                        help="Force the figure to the exact paper dimensions.")
     g_out.add_argument("--width", type=float, default=15.0,
                        help="Figure width in inches (ignored if --paper is set).")
-    g_out.add_argument("--track-height", type=float, default=1.6,
+    g_out.add_argument("--track-height", type=float, default=0.93,
                        help="Height per genome track (row) in inches.")
     g_out.add_argument("--wrap-kb", type=float, default=20.0,
                        help="Wrap the genome onto a new row about every N kb "
