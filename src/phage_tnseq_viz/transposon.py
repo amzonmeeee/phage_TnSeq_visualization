@@ -84,23 +84,30 @@ def find_insertion_sites(
 ) -> list[int]:
     """Return sorted 1-based genomic positions of the motif's insertion point.
 
-    The insertion point is taken as the *first* base of the (forward-strand) motif
-    occurrence. Overlapping matches are found. If ``both_strands`` is set, the
-    reverse-complement motif is also scanned (deduplicated against the forward hits);
-    for a palindromic motif such as ``TA`` this makes no difference.
+    The insertion point is the motif's 5' (first) base *on the strand it occurs on*.
+    Overlapping matches are found. If ``both_strands`` is set the reverse-complement
+    motif is also scanned on the minus strand, and its 5' base maps to the *right*
+    end of the match in forward coordinates (so the point stays on the same base of
+    the motif regardless of strand). Hits are deduplicated across strands; for a
+    palindromic motif such as ``TA`` the minus-strand scan is skipped entirely
+    because it would only re-find the same sites.
     """
     seq = sequence.upper()
+    n = len(motif)
     positions: set[int] = set()
 
     fwd = re.compile(f"(?=({_motif_to_regex(motif)}))")
     for m in fwd.finditer(seq):
-        positions.add(m.start() + 1)  # 1-based
+        positions.add(m.start() + 1)  # 1-based; 5' base of the motif on the + strand
 
     if both_strands:
         rc = _reverse_complement(motif)
         if rc != motif:
             rev = re.compile(f"(?=({_motif_to_regex(rc)}))")
             for m in rev.finditer(seq):
-                positions.add(m.start() + 1)
+                # The rev-comp match spans forward 1-based positions
+                # [m.start()+1 .. m.start()+n]. The motif's 5' base sits on the minus
+                # strand, i.e. at the right end in forward coordinates.
+                positions.add(m.start() + n)
 
     return sorted(positions)

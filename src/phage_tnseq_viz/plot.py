@@ -152,6 +152,40 @@ def _row_label(rec: GenomeRecord, idx: int, r0: int, r1: int, n_rows: int,
     return _fmt_kb_range(r0, r1)
 
 
+def _draw_clipped_arrow(ax, gene, r0: int, row_width: int, head_length: float,
+                        edge: str, linestyle: str, fill: str) -> None:
+    """Draw a gene's *whole* arrow shape, clipped to one wrapped row.
+
+    A boundary-straddling gene is drawn at its true full extent (arrowhead only at
+    the real 3' end) and then clipped to this row's window. The clip spans x only:
+    it cuts the wrap edge open — so the gene reads as one complete arrow sliced by
+    the wrap line, continuing on the neighbouring row — while leaving y unbounded so
+    the top/bottom borders keep their full line width. (Clipping to the arrow's own
+    y-extent would halve them, since the stroke is centred on the polygon edge, and
+    pyGenomeViz draws the unclipped neighbours with no clipping at all.)
+    """
+    from matplotlib.patches import Polygon
+    from matplotlib.transforms import Bbox, TransformedBbox
+
+    g0, g1 = gene.start - 1, gene.end
+    xs, xe = g0 - r0, g1 - r0            # arrow spans axis-x [xs, xe] (may exceed row)
+    y_lo, y_hi = ax.get_ylim()
+    ym = (y_lo + y_hi) / 2.0
+    hl = min(head_length, xe - xs)      # same head length pyGenomeViz uses
+    if gene.strand >= 0:                 # head at the 3' (right) end
+        verts = [(xs, y_lo), (xs, y_hi), (xe - hl, y_hi), (xe, ym), (xe - hl, y_lo)]
+    else:                                # head at the 3' (left) end
+        verts = [(xe, y_lo), (xe, y_hi), (xs + hl, y_hi), (xs, ym), (xs + hl, y_lo)]
+    poly = Polygon(verts, closed=True, facecolor=fill, edgecolor=edge,
+                   linewidth=GENE_EDGE_WIDTH, linestyle=linestyle,
+                   joinstyle="miter", zorder=3)
+    ax.add_patch(poly)
+    pad = (y_hi - y_lo) * 10.0  # >> the stroke's half-width, so y never clips
+    poly.set_clip_box(TransformedBbox(
+        Bbox.from_extents(0, y_lo - pad, row_width, y_hi + pad), ax.transData))
+    poly.set_clip_on(True)
+
+
 def render(
     records: list[GenomeRecord],
     insertion_sites: dict[str, list[int]],
@@ -208,9 +242,9 @@ def render(
     gc_skew_subtracks: dict[tuple[str, int], object] = {}
     row_window: dict[tuple[str, int], tuple[int, int]] = {}
     row_tracks: dict[tuple[str, int], object] = {}
-    # Clipped gene bodies (the boundary-straddling piece without the arrowhead) to
-    # draw by hand after plotfig() as shaft-height rectangles.
-    truncated_bodies: list[tuple[tuple[str, int], int, int, str, str]] = []
+    # Genes straddling a wrap boundary — drawn by hand after plotfig() as one whole
+    # arrow clipped to each row (pyGenomeViz rejects out-of-range coordinates).
+    straddling: list[tuple[tuple[str, int], object, str, str]] = []
     present_categories: set[str] = set()
     any_denovo = False
     any_vfdb = False
@@ -239,18 +273,10 @@ def render(
                     present_categories.add(colors.category_key(gene.function))
                 any_denovo = any_denovo or (not gene.annotated)
                 any_vfdb = any_vfdb or gene.is_vfdb_amr
-                # A gene straddling a wrap boundary is clipped to this row's window
-                # (pyGenomeViz rejects out-of-range coordinates). Only the piece that
-                # holds the gene's real head end (3' end: right for +, left for -) is
-                # drawn with an arrowhead; the other piece is a flat shaft-height
-                # rectangle, so the gene reads as one truncated arrow continuing
-                # across rows rather than two arrows or an oversized box.
-                head_in_row = g1 <= r1 if gene.strand >= 0 else g0 >= r0
-                if head_in_row:
+                if g0 >= r0 and g1 <= r1:
+                    # Fully inside this row: let pyGenomeViz draw the arrow.
                     seg.add_feature(
-                        max(g0, r0),
-                        min(g1, r1),
-                        gene.strand,
+                        g0, g1, gene.strand,
                         plotstyle="bigarrow",
                         arrow_shaft_ratio=ARROW_SHAFT_RATIO,
                         fc=options.gene_fill,
@@ -259,7 +285,9 @@ def render(
                         linestyle=ls,
                     )
                 else:
-                    truncated_bodies.append((key, max(g0, r0), min(g1, r1), edge, ls))
+                    # Straddles a wrap boundary: draw the whole arrow ourselves and
+                    # clip it to this row so it reads as one arrow sliced by the wrap.
+                    straddling.append((key, gene, edge, ls))
 
             # optional tRNA / CRISPR as thin boxes on the main lane
             if options.show_trna:
@@ -292,23 +320,15 @@ def render(
     gv.set_scale_xticks(labelsize=10, ymargin=0.3)
     fig = gv.plotfig()
 
-    # ---- truncated gene bodies: flat shaft-height rectangles at wrap cuts ----
-    if truncated_bodies:
-        from matplotlib.patches import Rectangle
-
-        for key, c0, c1, edge, ls in truncated_bodies:
-            track = row_tracks[key]
-            ax = track.ax
-            x0, x1 = track.transform_coord(c0), track.transform_coord(c1)
-            y_lo, y_hi = ax.get_ylim()
-            cy = (y_lo + y_hi) / 2.0
-            h = ARROW_SHAFT_RATIO * (y_hi - y_lo)
-            ax.add_patch(
-                Rectangle(
-                    (x0, cy - h / 2.0), x1 - x0, h,
-                    facecolor=options.gene_fill, edgecolor=edge,
-                    linewidth=GENE_EDGE_WIDTH, linestyle=ls, joinstyle="miter", zorder=3,
-                )
+    # ---- boundary-straddling genes: one whole arrow, clipped to each row ----
+    if straddling:
+        max_size = max(t.ax.get_xlim()[1] for t in row_tracks.values())
+        head_length = max_size * 0.015  # pyGenomeViz's bigarrow head length
+        for key, gene, edge, ls in straddling:
+            r0, r1 = row_window[key]
+            _draw_clipped_arrow(
+                row_tracks[key].ax, gene, r0, r1 - r0, head_length,
+                edge, ls, options.gene_fill,
             )
 
     # ---- draw signals on sub-track axes (only available after plotfig) ----
@@ -342,6 +362,7 @@ def render(
         present_categories=present_categories,
         include_vfdb=any_vfdb, include_denovo=any_denovo,
         transposon_label=transposon_label,
+        insertion_site_count=sum(len(sites) for sites in insertion_sites.values()),
         density_mappable=density_mappable,
     )
 
@@ -428,7 +449,8 @@ def _compress_axes(fig, top_in: float, bottom_in: float) -> tuple[float, float]:
 
 
 def _decorate(fig, records, options, *, present_categories, include_vfdb,
-              include_denovo, transposon_label, density_mappable):
+              include_denovo, transposon_label, insertion_site_count,
+              density_mappable):
     """Add the top title plus framed legend boxes and a density colorbar below.
 
     All decorations live in reserved top/bottom margins (never beside the plot),
@@ -455,7 +477,8 @@ def _decorate(fig, records, options, *, present_categories, include_vfdb,
     tn_h: list = []
     tn_l: list[str] = []
     if options.show_insertion_sites:
-        lbl = "Insertion site" + (f" ({transposon_label})" if transposon_label else "")
+        motif = f" ({transposon_label})" if transposon_label else ""
+        lbl = f"Insertion sites{motif} = {insertion_site_count:,}"
         tn_h.append(Line2D([0], [0], color=options.insertion_color, lw=1.6))
         tn_l.append(lbl)
     tn_h.append(Patch(facecolor="black", edgecolor="#000000", linewidth=1.0))
@@ -473,7 +496,9 @@ def _decorate(fig, records, options, *, present_categories, include_vfdb,
     if options.show_trna:
         seq_h.append(Patch(facecolor=TRNA_COLOR)); seq_l.append("tRNA / tmRNA / CRISPR")
 
-    # Each non-empty group becomes its own framed box; boxes are then spread evenly.
+    # Each non-empty group becomes its own framed box. Keep the compact single-row
+    # layout, but position the natural-width boxes with equal gaps so they neither
+    # overlap nor look uneven.
     boxes: list[tuple[str, list, list, int]] = []
     if gene_h:
         boxes.append(("Gene function — PHROG category", gene_h, gene_l,
@@ -486,17 +511,13 @@ def _decorate(fig, records, options, *, present_categories, include_vfdb,
     want_legend = options.show_legend and bool(boxes)
     show_cbar = density_mappable is not None
 
-    # Reserve top/bottom margins. pyGenomeViz hangs the kb ruler a *height-scaled*
-    # distance below the lowest track, so budget the ruler as a fraction of height
-    # and then measure where it actually ends before placing the legends.
+    # Reserve a top margin for the title and a bottom margin for the legends. The
+    # density colorbar goes on the right (vertical), not in the bottom band.
     height = fig.get_size_inches()[1]
     top_in = 0.90 if big else 0.10
     ruler_in = 0.04 * height + 0.15
     legend_in = 1.35 if want_legend else 0.0
-    cbar_in = 0.60 if show_cbar else 0.0
-    bottom_in = 0.0
-    if want_legend or show_cbar:
-        bottom_in = ruler_in + legend_in + cbar_in + 0.10
+    bottom_in = (ruler_in + legend_in + 0.10) if want_legend else 0.0
     _compress_axes(fig, top_in, bottom_in)
 
     if big:
@@ -504,22 +525,33 @@ def _decorate(fig, records, options, *, present_categories, include_vfdb,
         fig.text(0.5, 1 - 0.58 / height, f"{rec.accession} · {rec.length:,} bp",
                  ha="center", va="top", fontsize=10.5, color="#555555")
 
+    # Vertical density colorbar occupying the far right, beside the tracks.
+    track_right = 1.0
     if show_cbar:
-        cax = fig.add_axes([0.34, 0.30 / height, 0.32, 0.14 / height])
-        cbar = fig.colorbar(density_mappable, cax=cax, orientation="horizontal")
+        track_right = 0.90
+        for ax in fig.axes:
+            p = ax.get_position()
+            ax.set_position([p.x0, p.y0, max(1e-3, track_right - p.x0), p.height])
+        positions = [ax.get_position() for ax in fig.axes]
+        y0 = min(p.y0 for p in positions)
+        y1 = max(p.y1 for p in positions)
+        cax = fig.add_axes([track_right + 0.018, y0, 0.013, y1 - y0])
+        cbar = fig.colorbar(density_mappable, cax=cax)
         cbar.set_label("Insertion density (sites / kb)", fontsize=8.5)
         cbar.ax.tick_params(labelsize=7.5)
 
     if want_legend:
-        legend_top = _ruler_bottom_frac(fig, fallback=(cbar_in + legend_in) / height) - 0.01
+        legend_top = _ruler_bottom_frac(fig, fallback=legend_in / height) - 0.01
         common = dict(frameon=True, fontsize=8, borderpad=0.8, labelspacing=0.6,
                       columnspacing=1.1, handlelength=1.4, title_fontsize=9.5)
-        # Spread the boxes evenly across the width, all top-aligned under the ruler.
+        # Divide the bottom width into equal columns (one per box) and centre each
+        # box in its column: three-way when GC tracks are shown, two-way otherwise.
+        avail_left, avail_right = 0.04, track_right - 0.02
         n = len(boxes)
         for i, (title, handles, labels, ncol) in enumerate(boxes):
-            x = 0.04 + (i + 0.5) / n * 0.92
+            cx = avail_left + (i + 0.5) * (avail_right - avail_left) / n
             leg = fig.legend(
-                handles, labels, loc="upper center", bbox_to_anchor=(x, legend_top),
+                handles, labels, loc="upper center", bbox_to_anchor=(cx, legend_top),
                 ncol=ncol, title=title, **common,
             )
             leg.get_frame().set_edgecolor("#999999")
