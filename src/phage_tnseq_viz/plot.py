@@ -65,6 +65,28 @@ GC_TRACK_RATIO = 2.3
 FEATURE_TRACK_RATIO = 0.125
 # Gene arrow border line width.
 GENE_EDGE_WIDTH = 4.95
+# Target drawn height of the gene-arrow lane, as a share of one track's height. The
+# lane's natural height is whatever the margins leave over, so it swings with the number
+# of sub-tracks: without a floor the border stroke eats half the arrow (fat pills) on a
+# figure with no sub-tracks, and a sixth of it when every track is on. Pinning the lane
+# keeps the arrows — and the share of them taken by the border — the same either way.
+MIN_GENE_LANE_RATIO = 0.475
+# Bottom legend band, in figure fractions: the gap between cells, the width of the
+# colorbar's own cell, and the width of the colour strip drawn inside that cell.
+BAND_GAP = 0.018
+BAND_LEFT, BAND_RIGHT = 0.04, 0.97
+# Cells per band row. A leftover odd cell spans the whole row on its own, so that every
+# row starts and ends on the same two edges.
+BAND_COLS = 2
+# Vertical gap between band rows, and the cell height used when the colorbar stands
+# alone and so has no legend box to take its height from. Both in inches.
+BAND_ROW_GAP_IN = 0.18
+CBAR_ONLY_HEIGHT_IN = 1.25
+# Legend text size, held fixed: cells take the widest group's natural width rather
+# than shrinking the type to fit, and the row spills past the figure edges if need be.
+LEGEND_FONTSIZE = 9.0
+TITLE_FONTSIZE_RATIO = 9.5 / 8.0
+FRAME_EDGE_COLOR = "#999999"
 
 
 @dataclass
@@ -83,7 +105,7 @@ class PlotOptions:
     transparent: bool = False
     # optional tracks
     show_insertion_sites: bool = True
-    show_insertion_density: bool = False
+    show_insertion_density: bool = True
     show_gc_content: bool = False
     show_gc_skew: bool = False
     show_trna: bool = False
@@ -426,6 +448,20 @@ def _draw_density_row(sub, wt: WindowTrack, vmax: float, window, *, cmap):
     return im
 
 
+def _gene_lane_height_frac(fig) -> float:
+    """Figure fraction taken by the gene-arrow lane, before any margins are reserved.
+
+    Identified by the arrow stroke width, which nothing else on the figure uses.
+    """
+    for ax in fig.axes:
+        for coll in ax.collections:
+            lw = coll.get_linewidth()
+            lw = lw[0] if hasattr(lw, "__len__") and len(lw) else lw
+            if abs(float(lw) - GENE_EDGE_WIDTH) < 1e-6:
+                return ax.get_position().height
+    return fig.axes[0].get_position().height if fig.axes else 1.0
+
+
 def _compress_axes(fig, top_in: float, bottom_in: float) -> tuple[float, float]:
     """Squeeze every existing axis into the vertical band [bottom, 1-top].
 
@@ -446,6 +482,54 @@ def _compress_axes(fig, top_in: float, bottom_in: float) -> tuple[float, float]:
     for ax, p in targets:
         ax.set_position([p.x0, b + p.y0 * span, p.width, p.height * span])
     return b, t
+
+
+def _pad_to_rows(handles: list, labels: list[str], ncol: int, rows: int) -> tuple[list, list]:
+    """Pad a legend group with invisible entries so it lays out exactly ``rows`` rows.
+
+    Every group then has the same number of rows and therefore the same framed height,
+    which is what lets the boxes align into a grid. Matplotlib fills a legend column by
+    column, so padding to ``rows * ncol`` entries keeps the columns balanced too.
+    """
+    from matplotlib.lines import Line2D
+
+    handles, labels = list(handles), list(labels)
+    while len(handles) < rows * ncol:
+        handles.append(Line2D([], [], linestyle="none"))
+        labels.append("")
+    return handles, labels
+
+
+def _draw_colorbar_cell(fig, mappable, x: float, top: float, width: float, height: float,
+                        fs: float) -> None:
+    """Draw the density colorbar as a framed cell matching the legend boxes.
+
+    The frame, title and padding mimic a legend box so the colorbar reads as the last
+    cell of the same grid rather than a loose annotation beside it.
+    """
+    from matplotlib.patches import FancyBboxPatch
+    from matplotlib.ticker import MaxNLocator
+
+    title_fs = fs * TITLE_FONTSIZE_RATIO
+
+    fig.add_artist(FancyBboxPatch(
+        (x, top - height), width, height,
+        boxstyle="round,pad=0,rounding_size=0.008", transform=fig.transFigure,
+        facecolor="white", edgecolor=FRAME_EDGE_COLOR, linewidth=0.8, zorder=4,
+    ))
+    fig.text(x + width / 2.0, top - 0.10 * height, "Insertion density (sites / kb)",
+             ha="center", va="top", fontsize=title_fs, zorder=5)
+
+    # Lay the bar out as shares of the cell, not fixed inches: the cell's height tracks
+    # the legend boxes, so absolute padding would swallow the bar on short figures. The
+    # bar sits above its tick labels, which need the lower third of the cell.
+    cax = fig.add_axes([x + 0.10 * width, top - height + 0.38 * height,
+                        0.80 * width, 0.20 * height], zorder=5)
+    cbar = fig.colorbar(mappable, cax=cax, orientation="horizontal")
+    cbar.outline.set_edgecolor(FRAME_EDGE_COLOR)
+    cbar.locator = MaxNLocator(nbins=6, integer=True)
+    cbar.update_ticks()
+    cbar.ax.tick_params(labelsize=fs * 0.94, length=2.5, pad=2)
 
 
 def _decorate(fig, records, options, *, present_categories, include_vfdb,
@@ -496,9 +580,9 @@ def _decorate(fig, records, options, *, present_categories, include_vfdb,
     if options.show_trna:
         seq_h.append(Patch(facecolor=TRNA_COLOR)); seq_l.append("tRNA / tmRNA / CRISPR")
 
-    # Each non-empty group becomes its own framed box. Keep the compact single-row
-    # layout, but position the natural-width boxes with equal gaps so they neither
-    # overlap nor look uneven.
+    # Each non-empty group becomes its own framed box; the boxes and the colorbar are
+    # then laid out as equal cells of a grid, wrapping to a second row if one would
+    # not fit across the figure.
     boxes: list[tuple[str, list, list, int]] = []
     if gene_h:
         boxes.append(("Gene function — PHROG category", gene_h, gene_l,
@@ -511,13 +595,81 @@ def _decorate(fig, records, options, *, present_categories, include_vfdb,
     want_legend = options.show_legend and bool(boxes)
     show_cbar = density_mappable is not None
 
-    # Reserve a top margin for the title and a bottom margin for the legends. The
-    # density colorbar goes on the right (vertical), not in the bottom band.
     height = fig.get_size_inches()[1]
+    fs = LEGEND_FONTSIZE
+    n_cells = len(boxes) if want_legend else 0
+    common = dict(frameon=True, fontsize=fs, borderpad=0.8, labelspacing=0.6,
+                  columnspacing=2.2, handlelength=1.4,
+                  title_fontsize=fs * TITLE_FONTSIZE_RATIO)
+
+    # Measure the cells before reserving the band: how tall the band must be depends on
+    # how many rows the cells take, and the cells must be at least as wide as the widest
+    # group measures — expanding a group into a narrower cell makes matplotlib crush its
+    # columns into each other.
+    span = BAND_RIGHT - BAND_LEFT
+    n_cols = BAND_COLS
+    cell_w = (span - BAND_GAP * (n_cols - 1)) / n_cols
+    cell_h_in = CBAR_ONLY_HEIGHT_IN
+    if want_legend:
+        n_rows_in_box = max(-(-len(handles) // ncol) for _, handles, _, ncol in boxes)
+        boxes = [(title, *_pad_to_rows(handles, labels, ncol, n_rows_in_box), ncol)
+                 for title, handles, labels, ncol in boxes]
+        probes = [fig.legend(h, l, loc="upper left", ncol=ncol, title=t,
+                             bbox_to_anchor=(0.0, 0.5), **common)
+                  for t, h, l, ncol in boxes]
+        fig.canvas.draw()
+        renderer = fig.canvas.get_renderer()
+        extents = [leg.get_window_extent(renderer) for leg in probes]
+        w_max = max(e.width for e in extents) / fig.bbox.width
+        cell_h_in = max(e.height for e in extents) / fig.dpi
+        for leg in probes:
+            leg.remove()
+        # Two cells only if two fit; otherwise one per row, each spanning the band.
+        if BAND_COLS * w_max + BAND_GAP * (BAND_COLS - 1) > span:
+            n_cols = 1
+        cell_w = max((span - BAND_GAP * (n_cols - 1)) / n_cols, w_max)
+
+    # A leftover odd cell spans the row on its own, so every row shares the same left
+    # and right edges.
+    items: list[int | None] = list(range(n_cells)) + ([None] if show_cbar else [])
+    band_rows = [items[i:i + n_cols] for i in range(0, len(items), n_cols)]
+    row_w = n_cols * cell_w + BAND_GAP * (n_cols - 1)
+
+    # Reserve a top margin for the title and a bottom band for the rows of cells.
     top_in = 0.90 if big else 0.10
-    ruler_in = 0.04 * height + 0.15
-    legend_in = 1.35 if want_legend else 0.0
-    bottom_in = (ruler_in + legend_in + 0.10) if want_legend else 0.0
+
+    def margins(fig_h: float, n_rows: int) -> tuple[float, float]:
+        """Bottom margin and band height, in inches, for ``n_rows`` rows of cells."""
+        if not n_rows:
+            return 0.0, 0.0
+        band = n_rows * cell_h_in + (n_rows - 1) * BAND_ROW_GAP_IN + 0.10
+        ruler = 0.04 * fig_h + 0.15  # pyGenomeViz hangs the ruler a height-scaled drop
+        return ruler + band + 0.10, band
+
+    bottom_in, band_in = margins(height, len(band_rows))
+    if len(band_rows) > 1:
+        # A second row of cells must grow the canvas, not squeeze the tracks into what
+        # is left. Hold the tracks at the height they would have had with one row, then
+        # settle the figure height: the ruler's drop scales with it, so iterate.
+        track_in = max(0.5, height - top_in - margins(height, 1)[0])
+        for _ in range(3):
+            height = top_in + track_in + bottom_in
+            bottom_in, band_in = margins(height, len(band_rows))
+        fig.set_size_inches(fig.get_size_inches()[0], height)
+
+    # _compress_axes scales the tracks by whatever fraction the margins leave over. On a
+    # figure with few sub-tracks that fraction collapses, so grow the canvas until the
+    # gene lane reaches its target. The ruler's drop scales with the height: iterate.
+    lane_frac = _gene_lane_height_frac(fig)
+    lane_in = MIN_GENE_LANE_RATIO * options.track_height
+    for _ in range(4):
+        needed = top_in + bottom_in + lane_in / max(lane_frac, 1e-6)
+        if height >= needed:
+            break
+        height = needed
+        bottom_in, band_in = margins(height, len(band_rows))
+        fig.set_size_inches(fig.get_size_inches()[0], height)
+
     _compress_axes(fig, top_in, bottom_in)
 
     if big:
@@ -525,36 +677,48 @@ def _decorate(fig, records, options, *, present_categories, include_vfdb,
         fig.text(0.5, 1 - 0.58 / height, f"{rec.accession} · {rec.length:,} bp",
                  ha="center", va="top", fontsize=10.5, color="#555555")
 
-    # Vertical density colorbar occupying the far right, beside the tracks.
-    track_right = 1.0
-    if show_cbar:
-        track_right = 0.90
-        for ax in fig.axes:
-            p = ax.get_position()
-            ax.set_position([p.x0, p.y0, max(1e-3, track_right - p.x0), p.height])
-        positions = [ax.get_position() for ax in fig.axes]
-        y0 = min(p.y0 for p in positions)
-        y1 = max(p.y1 for p in positions)
-        cax = fig.add_axes([track_right + 0.018, y0, 0.013, y1 - y0])
-        cbar = fig.colorbar(density_mappable, cax=cax)
-        cbar.set_label("Insertion density (sites / kb)", fontsize=8.5)
-        cbar.ax.tick_params(labelsize=7.5)
+    if not band_rows:
+        return
 
-    if want_legend:
-        legend_top = _ruler_bottom_frac(fig, fallback=legend_in / height) - 0.01
-        common = dict(frameon=True, fontsize=8, borderpad=0.8, labelspacing=0.6,
-                      columnspacing=1.1, handlelength=1.4, title_fontsize=9.5)
-        # Divide the bottom width into equal columns (one per box) and centre each
-        # box in its column: three-way when GC tracks are shown, two-way otherwise.
-        avail_left, avail_right = 0.04, track_right - 0.02
-        n = len(boxes)
-        for i, (title, handles, labels, ncol) in enumerate(boxes):
-            cx = avail_left + (i + 0.5) * (avail_right - avail_left) / n
-            leg = fig.legend(
-                handles, labels, loc="upper center", bbox_to_anchor=(cx, legend_top),
-                ncol=ncol, title=title, **common,
-            )
-            leg.get_frame().set_edgecolor("#999999")
+    band_top = _ruler_bottom_frac(fig, fallback=band_in / height) - 0.01
+    cell_h = cell_h_in / height
+    row_gap = BAND_ROW_GAP_IN / height
+
+    # Place the legends first, then the colorbar cells, whose frames must be drawn to
+    # match a legend's *measured* frame: matplotlib offsets a legend's frame from its
+    # anchor, so a frame drawn at the nominal cell rect would sit a little high and wide.
+    pending: list[tuple[float, float, float]] = []
+    reference = None
+    for r, row in enumerate(band_rows):
+        top = band_top - r * (cell_h + row_gap)
+        w = cell_w if len(row) == n_cols else row_w  # a lone cell spans the row
+        x = 0.5 - row_w / 2.0  # every row centred on the same edges
+        for i in row:
+            if i is None:
+                pending.append((x, top, w))
+            else:
+                title, handles, labels, ncol = boxes[i]
+                leg = fig.legend(handles, labels, loc="upper left", ncol=ncol,
+                                 title=title, mode="expand",
+                                 bbox_to_anchor=(x, top, w, 0.0), **common)
+                leg.get_frame().set_edgecolor(FRAME_EDGE_COLOR)
+                reference = reference or (leg, x, top, w)
+            x += w + BAND_GAP
+
+    if pending:
+        dx0 = dx1 = dy1 = 0.0
+        cbar_h = cell_h
+        if reference is not None:
+            leg, x0, top0, w0 = reference
+            fig.canvas.draw()
+            e = leg.get_window_extent(fig.canvas.get_renderer())
+            dx0 = e.x0 / fig.bbox.width - x0
+            dx1 = e.x1 / fig.bbox.width - (x0 + w0)
+            dy1 = e.y1 / fig.bbox.height - top0
+            cbar_h = e.height / fig.bbox.height
+        for x, top, w in pending:
+            _draw_colorbar_cell(fig, density_mappable, x + dx0, top + dy1,
+                                w + dx1 - dx0, cbar_h, fs)
 
 
 def _ruler_bottom_frac(fig, fallback: float) -> float:
