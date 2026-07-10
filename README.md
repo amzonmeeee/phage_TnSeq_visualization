@@ -25,7 +25,7 @@ single line with `--no-wrap`. Per genome/contig it shows:
   * **Border colour = PHROG functional category** (phold/pharokka colour scheme, with legend).
   * De-novo ORFs (from an unannotated genome) get a **grey dashed border**.
 * **Insertion-site track** — short **red** ticks at every position the transposon can insert.
-* Optional **insertion-density** heat track (sites/kb, colour-mapped) to spot hot/cold zones.
+* **Insertion-density** heat track (sites/kb, colour-mapped) to spot hot/cold zones; on by default.
 * Optional **GC content**, **GC skew**, and **tRNA/CRISPR** tracks.
 * Genome **name / accession** label (auto-detected or user-supplied).
 
@@ -92,7 +92,7 @@ phage-tnseq-viz genome.gbk -t TA --single-strand
 
 ```bash
 # Extra tracks
-phage-tnseq-viz genome.gbk --insertion-density        # sites/kb heat track
+phage-tnseq-viz genome.gbk --no-insertion-density     # drop the sites/kb heat track
 phage-tnseq-viz genome.gbk --gc-content --gc-skew --trna
 
 # Naming & legend

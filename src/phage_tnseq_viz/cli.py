@@ -34,8 +34,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     g_tn.add_argument("--no-insertion-sites", action="store_true",
                       help="Do not draw insertion-site ticks.")
-    g_tn.add_argument("--insertion-density", action="store_true",
-                      help="Add a sliding-window insertion-density heat track (sites/kb).")
+    g_tn.add_argument("--no-insertion-density", action="store_true",
+                      help="Do not draw the sliding-window insertion-density heat track "
+                           "(sites/kb); it is drawn by default.")
     g_tn.add_argument("--density-window", type=int, default=None,
                       help="Window size (bp) for the density track. Default: length/100.")
     g_tn.add_argument("--single-strand", action="store_true",
@@ -140,7 +141,7 @@ def main(argv: list[str] | None = None) -> int:
         dpi=args.dpi,
         transparent=args.transparent,
         show_insertion_sites=draw_insertions,
-        show_insertion_density=args.insertion_density and draw_insertions,
+        show_insertion_density=not args.no_insertion_density and draw_insertions,
         density_window=args.density_window,
         show_gc_content=args.gc_content,
         show_gc_skew=args.gc_skew,
