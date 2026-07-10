@@ -56,6 +56,22 @@ def test_degenerate_motif_both_strands():
     assert sites  # non-empty
 
 
+def test_reverse_strand_insertion_point_is_motif_5prime():
+    # Asymmetric motif GATA (rev-comp = TATC) in GATATATC:
+    #   forward GATA at 1-based 1 -> site 1
+    #   minus strand: TATC spans forward 5..8; the motif's 5' base (the G of GATA
+    #   read on the - strand) is at the right end -> forward position 8.
+    assert find_insertion_sites("GATATATC", "GATA") == [1, 8]
+    assert find_insertion_sites("GATATATC", "GATA", both_strands=False) == [1]
+
+
+def test_palindrome_single_scan_covers_both_strands():
+    # TA is its own reverse complement, so one strand already finds every site.
+    seq = "TAGCTAAT"
+    assert (find_insertion_sites(seq, "TA", both_strands=True)
+            == find_insertion_sites(seq, "TA", both_strands=False))
+
+
 def test_insertion_density_counts_per_kb():
     # 10 sites evenly spread in first 1000 bp of a 2000 bp genome
     sites = list(range(50, 1050, 100))  # 50,150,...,950  -> 10 sites
