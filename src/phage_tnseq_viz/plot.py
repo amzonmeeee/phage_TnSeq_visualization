@@ -1,9 +1,10 @@
-"""Render a linear phage genome map (pre-visualization, no sequencing data yet).
+"""Render a linear phage genome map with optional Tn-Seq data overlays.
 
 Layout per genome/contig, top to bottom within one feature track:
-  * gene arrows  – black fill (essentiality placeholder), border colour = PHROG
+  * gene arrows  – optional essentiality-coloured fill, border colour = PHROG
                    functional category (phold scheme); de-novo ORFs get a grey
                    dashed border.
+  * optional blue read-count histogram immediately above each arrow lane.
   * insertion track – short red ticks at every transposon insertion site.
   * (optional) GC content, GC skew, tRNA/CRISPR sub-tracks.
 
@@ -17,10 +18,16 @@ import math
 from dataclasses import dataclass
 from pathlib import Path
 
+# The package only writes figures; a non-interactive backend makes CLI rendering
+# reliable on clusters and CI machines without a display server.
+import matplotlib
+
+matplotlib.use("Agg")
+
 from pygenomeviz import GenomeViz
 
 from . import colors
-from .genome import GenomeRecord
+from .genome import GenomeRecord, gene_identifier
 from .tracks import (
     WindowTrack,
     compute_gc_content,
@@ -106,6 +113,7 @@ class PlotOptions:
     # optional tracks
     show_insertion_sites: bool = True
     show_insertion_density: bool = True
+    show_read_histogram: bool = True
     show_gc_content: bool = False
     show_gc_skew: bool = False
     show_trna: bool = False
@@ -114,7 +122,8 @@ class PlotOptions:
     density_cmap: str = "inferno"
     # styling
     insertion_color: str = "#e50000"
-    gene_fill: str = "#000000"       # essentiality placeholder
+    read_histogram_color: str = "#1677ff"
+    gene_fill: str = "#000000"       # used when no essentiality calls are supplied
     show_legend: bool = True
     big_title: bool = True           # genome name as a big heading on top
                                      # (False = small label beside the first row)
@@ -127,6 +136,15 @@ def _gene_edge(gene) -> tuple[str, str]:
     if gene.is_vfdb_amr:
         return colors.VFDB_AMR_COLOR, "-"
     return colors.category_color(gene.function), "-"
+
+
+def _gene_fill(accession: str, gene, gene_calls, default: str) -> str:
+    """Resolve one arrow fill without changing legacy no-data rendering."""
+    if gene_calls is None:
+        return default
+    return colors.essentiality_color(
+        gene_calls.get((accession, gene_identifier(gene, contig=accession)))
+    )
 
 
 def _row_windows(length: int, wrap_kb: float, force_rows: int | None) -> list[tuple[int, int]]:
@@ -214,8 +232,20 @@ def render(
     options: PlotOptions,
     out_path: str | Path,
     transposon_label: str = "",
+    *,
+    read_counts: dict[str, dict[int, float]] | None = None,
+    gene_calls: dict[tuple[str, str], str | None] | None = None,
 ) -> Path:
+    """Render a map and optional final-dataset overlays.
+
+    ``read_counts`` maps ``accession -> {1-based insertion position: count}`` and
+    is rendered as a blue, contig-normalised histogram above the gene arrows.
+    ``gene_calls`` maps ``(accession, gene identifier)`` to calls produced by the
+    built-in or a user classifier.  The identifier is the GenBank ``locus_tag``
+    (or ``ID``/``label`` when loaded) and falls back to ``start-end:strand``.
+    """
     out_path = Path(out_path)
+    read_counts = read_counts or {}
 
     fig_width = options.fig_width
     if options.paper:
@@ -240,6 +270,7 @@ def render(
     density_signal: dict[str, tuple[WindowTrack, float]] = {}
     gcc_signal: dict[str, tuple[WindowTrack, float]] = {}
     gcs_signal: dict[str, tuple[WindowTrack, float]] = {}
+    read_count_max: dict[str, float] = {}
     for rec in records:
         if options.show_insertion_density and insertion_sites.get(rec.accession):
             win = options.density_window or max(200, rec.length // 100)
@@ -255,6 +286,9 @@ def render(
             win = options.gc_window or _default_window(rec.length)
             wt = compute_gc_skew(rec.sequence, win, _gc_step(win))
             gcs_signal[rec.accession] = (wt, max((abs(v) for v in wt.values), default=1.0) or 1.0)
+        positive_counts = [count for count in read_counts.get(rec.accession, {}).values() if count > 0]
+        if positive_counts:
+            read_count_max[rec.accession] = max(positive_counts)
 
     # Keep references (keyed by genome + row index) so we can draw on the
     # sub-track axes after plotfig(), and remember each row's coordinate window.
@@ -266,8 +300,9 @@ def render(
     row_tracks: dict[tuple[str, int], object] = {}
     # Genes straddling a wrap boundary — drawn by hand after plotfig() as one whole
     # arrow clipped to each row (pyGenomeViz rejects out-of-range coordinates).
-    straddling: list[tuple[tuple[str, int], object, str, str]] = []
+    straddling: list[tuple[tuple[str, int], object, str, str, str]] = []
     present_categories: set[str] = set()
+    present_essentiality_calls: set[str | None] = set()
     any_denovo = False
     any_vfdb = False
 
@@ -291,6 +326,11 @@ def render(
                 if g1 <= r0 or g0 >= r1:
                     continue
                 edge, ls = _gene_edge(gene)
+                fill = _gene_fill(rec.accession, gene, gene_calls, options.gene_fill)
+                if gene_calls is not None:
+                    present_essentiality_calls.add(
+                        gene_calls.get((rec.accession, gene_identifier(gene, contig=rec.accession)))
+                    )
                 if gene.annotated and not gene.is_vfdb_amr:
                     present_categories.add(colors.category_key(gene.function))
                 any_denovo = any_denovo or (not gene.annotated)
@@ -301,7 +341,7 @@ def render(
                         g0, g1, gene.strand,
                         plotstyle="bigarrow",
                         arrow_shaft_ratio=ARROW_SHAFT_RATIO,
-                        fc=options.gene_fill,
+                        fc=fill,
                         ec=edge,
                         lw=GENE_EDGE_WIDTH,
                         linestyle=ls,
@@ -309,7 +349,7 @@ def render(
                 else:
                     # Straddles a wrap boundary: draw the whole arrow ourselves and
                     # clip it to this row so it reads as one arrow sliced by the wrap.
-                    straddling.append((key, gene, edge, ls))
+                    straddling.append((key, gene, edge, ls, fill))
 
             # optional tRNA / CRISPR as thin boxes on the main lane
             if options.show_trna:
@@ -346,14 +386,38 @@ def render(
     if straddling:
         max_size = max(t.ax.get_xlim()[1] for t in row_tracks.values())
         head_length = max_size * 0.015  # pyGenomeViz's bigarrow head length
-        for key, gene, edge, ls in straddling:
+        for key, gene, edge, ls, fill in straddling:
             r0, r1 = row_window[key]
             _draw_clipped_arrow(
                 row_tracks[key].ax, gene, r0, r1 - r0, head_length,
-                edge, ls, options.gene_fill,
+                edge, ls, fill,
             )
 
     # ---- draw signals on sub-track axes (only available after plotfig) ----
+    # Keep the read histogram in the same main axis as its arrows.  Extending the
+    # upper y-limit creates a lane *above* the arrows even for wrapped genomes,
+    # rather than adding a pyGenomeViz subtrack (which is always placed below).
+    has_read_histogram = bool(options.show_read_histogram and read_count_max)
+    if has_read_histogram:
+        for key, track in row_tracks.items():
+            accession, _ = key
+            r0, r1 = row_window[key]
+            values = [
+                (position, count)
+                for position, count in read_counts.get(accession, {}).items()
+                if r0 < position <= r1 and count > 0
+            ]
+            if not values:
+                continue
+            vmax = read_count_max[accession]
+            xs = [track.transform_coord(position) for position, _ in values]
+            tops = [1.12 + 1.08 * (count / vmax) for _, count in values]
+            track.ax.set_ylim(-1.0, 2.35)
+            track.ax.vlines(
+                xs, 1.08, tops, color=options.read_histogram_color,
+                lw=0.55, zorder=5,
+            )
+
     density_mappable = None
     for key, sub in insertion_subtracks.items():
         acc, _ = key
@@ -385,6 +449,8 @@ def render(
         include_vfdb=any_vfdb, include_denovo=any_denovo,
         transposon_label=transposon_label,
         insertion_site_count=sum(len(sites) for sites in insertion_sites.values()),
+        essentiality_calls=present_essentiality_calls if gene_calls is not None else None,
+        has_read_histogram=has_read_histogram,
         density_mappable=density_mappable,
     )
 
@@ -534,7 +600,7 @@ def _draw_colorbar_cell(fig, mappable, x: float, top: float, width: float, heigh
 
 def _decorate(fig, records, options, *, present_categories, include_vfdb,
               include_denovo, transposon_label, insertion_site_count,
-              density_mappable):
+              essentiality_calls, has_read_histogram, density_mappable):
     """Add the top title plus framed legend boxes and a density colorbar below.
 
     All decorations live in reserved top/bottom margins (never beside the plot),
@@ -550,12 +616,21 @@ def _decorate(fig, records, options, *, present_categories, include_vfdb,
     gene_h: list = []
     gene_l: list[str] = []
     for label, color in colors.legend_entries(present_categories, include_vfdb=include_vfdb):
-        gene_h.append(Patch(facecolor="black", edgecolor=color, linewidth=1.6))
+        gene_h.append(Patch(facecolor="white", edgecolor=color, linewidth=1.6))
         gene_l.append(label)
     if include_denovo:
-        gene_h.append(Patch(facecolor="black", edgecolor=colors.UNANNOTATED_EDGE,
+        gene_h.append(Patch(facecolor="white", edgecolor=colors.UNANNOTATED_EDGE,
                             linewidth=1.6, linestyle="--"))
         gene_l.append("De-novo ORF (unannotated)")
+
+    # Essentiality legend — arrow fill colour.  Calls are kept independent from
+    # the PHROG border legend so both visual encodings remain readable.
+    ess_h: list = []
+    ess_l: list[str] = []
+    if essentiality_calls is not None:
+        for label, color in colors.essentiality_legend_entries(essentiality_calls):
+            ess_h.append(Patch(facecolor=color, edgecolor="#555555", linewidth=0.8))
+            ess_l.append(label)
 
     # Transposon legend (its own box).
     tn_h: list = []
@@ -565,8 +640,22 @@ def _decorate(fig, records, options, *, present_categories, include_vfdb,
         lbl = f"Insertion sites{motif} = {insertion_site_count:,}"
         tn_h.append(Line2D([0], [0], color=options.insertion_color, lw=1.6))
         tn_l.append(lbl)
-    tn_h.append(Patch(facecolor="black", edgecolor="#000000", linewidth=1.0))
-    tn_l.append("Gene fill = essentiality (no data yet)")
+    if has_read_histogram:
+        tn_h.append(Line2D([0], [0], color=options.read_histogram_color, lw=2.0))
+        tn_l.append("Read count per insertion site (relative scale)")
+    if essentiality_calls is None:
+        tn_h.append(Patch(facecolor="black", edgecolor="#000000", linewidth=1.0))
+        tn_l.append("Gene fill = essentiality (no data yet)")
+
+    # With sequencing data, keep the count-bar/transposon key with the
+    # essentiality palette.  It prevents a third, mostly-empty legend row while
+    # still keeping PHROG borders in their own independent box.
+    essentiality_title = "Tn-Seq essentiality"
+    if ess_h and tn_h:
+        ess_h.extend(tn_h)
+        ess_l.extend(tn_l)
+        tn_h, tn_l = [], []
+        essentiality_title = "Tn-Seq data & essentiality"
 
     # Sequence-track legend (its own box).
     seq_h: list = []
@@ -587,6 +676,9 @@ def _decorate(fig, records, options, *, present_categories, include_vfdb,
     if gene_h:
         boxes.append(("Gene function — PHROG category", gene_h, gene_l,
                       2 if len(gene_h) > 4 else 1))
+    if ess_h:
+        boxes.append((essentiality_title, ess_h, ess_l,
+                      2 if len(ess_h) > 4 else 1))
     if tn_h:
         boxes.append(("Transposon", tn_h, tn_l, 1))
     if seq_h:

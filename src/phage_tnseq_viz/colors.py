@@ -50,6 +50,34 @@ UNANNOTATED_EDGE = "#999999"
 
 DEFAULT_CATEGORY = "unknown function"
 
+# Gene-arrow fill colours for the built-in Harms-lab saturation classifier.
+#
+# These intentionally use a separate, colour-blind-friendly palette from the
+# PHROG palette above: PHROG remains the *border* colour, whereas these colours
+# communicate the experimental Tn-Seq call in the arrow fill.  Unknown custom
+# calls retain a neutral grey rather than silently borrowing a biological call.
+ESSENTIALITY_COLORS: dict[str, str] = {
+    "Essential": "#d73027",
+    "Strong fitness defect": "#fc8d59",
+    "Intermediate": "#fee08b",
+    "Reduced fitness": "#91bfdb",
+    "Non-essential": "#1a9850",
+    "Ambiguous": "#9e9e9e",
+    "Insufficient sites": "#d9d9d9",
+    "Unclassified": "#bdbdbd",
+}
+
+ESSENTIALITY_LABELS: dict[str, str] = {
+    "Essential": "Essential",
+    "Strong fitness defect": "Strong fitness defect",
+    "Intermediate": "Intermediate",
+    "Reduced fitness": "Reduced fitness",
+    "Non-essential": "Non-essential",
+    "Ambiguous": "Ambiguous",
+    "Insufficient sites": "Insufficient candidate sites (≤5)",
+    "Unclassified": "Unclassified / custom call",
+}
+
 
 def _normalize(function: str | None) -> str:
     if not function:
@@ -151,3 +179,38 @@ def legend_entries(categories: set[str], include_vfdb: bool = False) -> list[tup
     if include_vfdb:
         entries.append((VFDB_AMR_LABEL, VFDB_AMR_COLOR))
     return entries
+
+
+def essentiality_key(call: str | None) -> str:
+    """Normalise a built-in essentiality call for plotting.
+
+    The original R script writes ``NA`` for genes with five or fewer candidate
+    sites.  Python represents that as ``None`` and the plot labels it explicitly
+    as ``"Insufficient sites"``.  A caller-supplied classifier may return any
+    other label; those are displayed as ``Unclassified`` unless it supplies its
+    own palette in a future extension.
+    """
+    if call is None or not str(call).strip():
+        return "Insufficient sites"
+    value = str(call).strip()
+    return value if value in ESSENTIALITY_COLORS else "Unclassified"
+
+
+def essentiality_color(call: str | None) -> str:
+    """Return the arrow-fill colour for an essentiality call."""
+    return ESSENTIALITY_COLORS[essentiality_key(call)]
+
+
+def essentiality_label(call: str | None) -> str:
+    """Return the legend label for an essentiality call."""
+    return ESSENTIALITY_LABELS[essentiality_key(call)]
+
+
+def essentiality_legend_entries(calls: set[str | None]) -> list[tuple[str, str]]:
+    """Return present essentiality calls in a stable biological order."""
+    present = {essentiality_key(call) for call in calls}
+    return [
+        (ESSENTIALITY_LABELS[key], colour)
+        for key, colour in ESSENTIALITY_COLORS.items()
+        if key in present
+    ]
