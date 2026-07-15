@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "phage-tnseq-viz"
-version = "0.1.0"
-description = "Pre-visualization tool for phage Tn-Seq (HIDDEN-seq): linear phage genome maps with gene arrows and transposon insertion sites."
+version = "0.2.0"
+description = "Phage Tn-Seq processing hand-off and genome maps with per-site read counts and essentiality overlays."
 readme = "README.md"
 requires-python = ">=3.9"
 license = { file = "LICENSE" }

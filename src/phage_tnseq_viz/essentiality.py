@@ -1,0 +1,602 @@
+"""Essentiality calls for per-site phage Tn-Seq counts.
+
+This module is a dependency-free port of the supplied
+``essentiality_classification.R`` workflow.  It deliberately works with a
+*complete* candidate-site table: an unobserved candidate insertion must be
+present with ``read_count=0`` or saturation cannot be calculated correctly.
+
+The reference R script calls those candidates ``TA_site``.  The neutral name
+``position`` is used here so a caller can explicitly choose another candidate
+site model (for example, every base for a near-random transposon).  That is an
+adaptation of the TA-site method, not a claim that its biological thresholds
+have been validated for every transposon.
+
+Custom classifiers
+------------------
+Users may supply a local Python file containing exactly this callable::
+
+    def classify_gene(gene_id, site_rows):
+        # site_rows is a tuple of GeneSiteRow objects, including zero-count sites
+        return "My category"  # or None for no call
+
+Load it with :func:`load_classifier` and apply it with
+:func:`apply_classifier`.  Loading a classifier executes user-provided Python,
+so only use a file from a trusted source.
+"""
+
+from __future__ import annotations
+
+from collections import Counter
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass
+import hashlib
+import importlib.util
+import math
+from pathlib import Path
+from typing import Any, Optional
+
+
+# Labels emitted by the supplied R implementation.
+ESSENTIAL = "Essential"
+NON_ESSENTIAL = "Non-essential"
+INTERMEDIATE = "Intermediate"
+STRONG_FITNESS_DEFECT = "Strong fitness defect"
+REDUCED_FITNESS = "Reduced fitness"
+AMBIGUOUS = "Ambiguous"
+FURTHER_ANALYSIS = "Further analysis"
+
+
+@dataclass(frozen=True)
+class InsertionSite:
+    """A candidate genomic insertion site and its post-processing read count.
+
+    ``position`` is 1-based and inclusive, matching :class:`~.genome.Gene`.
+    ``contig`` should normally be the GenBank record accession.
+    """
+
+    position: int
+    read_count: float
+    contig: str = ""
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "position", _coerce_position(self.position, "position"))
+        object.__setattr__(self, "read_count", _coerce_read_count(self.read_count))
+        object.__setattr__(self, "contig", _coerce_contig(self.contig))
+
+
+@dataclass(frozen=True)
+class GeneAssignment:
+    """The CDS to which a candidate insertion site belongs."""
+
+    gene_id: str
+    strand: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "gene_id", _coerce_gene_id(self.gene_id))
+        object.__setattr__(self, "strand", _coerce_strand(self.strand))
+
+
+@dataclass(frozen=True)
+class AnnotatedInsertionSite:
+    """An insertion site annotated with zero, one, or several overlapping CDSs."""
+
+    position: int
+    read_count: float
+    contig: str = ""
+    genes: tuple[GeneAssignment, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "position", _coerce_position(self.position, "position"))
+        object.__setattr__(self, "read_count", _coerce_read_count(self.read_count))
+        object.__setattr__(self, "contig", _coerce_contig(self.contig))
+        assignments = tuple(self.genes)
+        if not all(isinstance(assignment, GeneAssignment) for assignment in assignments):
+            raise TypeError("genes must contain GeneAssignment objects")
+        object.__setattr__(self, "genes", assignments)
+
+
+@dataclass(frozen=True)
+class GeneSiteRow:
+    """One gene-specific view of a site passed to a custom classifier.
+
+    An overlapping site appears once for each overlapping gene, which is the
+    same flattening performed by ``separate_rows(gene, sep = ",")`` in the R
+    workflow.
+    """
+
+    contig: str
+    gene_id: str
+    strand: str
+    position: int
+    read_count: float
+
+
+@dataclass(frozen=True)
+class GeneClassification:
+    """Per-gene statistics and the resulting essentiality label.
+
+    ``initial_call`` records the saturation-only screen.  ``final_call`` is the
+    R refinement/fitness-adjusted result, or a custom result when a custom
+    classifier is supplied.  ``None`` faithfully represents R's ``NA`` for a
+    gene with five or fewer candidate sites.
+    """
+
+    contig: str
+    gene_id: str
+    strand: str
+    total_sites: int
+    hits: int
+    saturation: float
+    initial_call: str | None
+    final_call: str | None
+
+
+@dataclass(frozen=True)
+class ClassificationResult:
+    """The calls plus the pooled positive-count median used by the R method."""
+
+    calls: tuple[GeneClassification, ...]
+    read_threshold: float | None
+
+
+@dataclass(frozen=True)
+class ConsensusCall:
+    """A consensus label over subsampling replicates."""
+
+    contig: str
+    gene_id: str
+    consensus_call: str
+    votes: int
+    n_replicates: int
+    replicate_calls: tuple[str | None, ...]
+
+
+GeneClassifier = Callable[[str, tuple[GeneSiteRow, ...]], Optional[str]]
+
+
+def annotate_sites_with_genes(
+    sites: Iterable[InsertionSite],
+    genes: Iterable[object],
+    *,
+    contig: str | None = None,
+    gene_id_getter: Callable[[object], str | None] | None = None,
+) -> list[AnnotatedInsertionSite]:
+    """Annotate candidate sites using 1-based inclusive CDS coordinates.
+
+    ``genes`` may be the project's :class:`~phage_tnseq_viz.genome.Gene`
+    objects or mapping/object records with ``start``, ``end``, ``strand``, and
+    optionally ``locus``.  The default identifier is ``gene.locus`` (currently
+    populated from ``locus_tag`` before ``ID``/``label``), falling back to the
+    deterministic ``contig:start-end:strand`` requested by the plotting/CSV
+    layer.  Pass the record accession through ``contig=...`` whenever sites do
+    not already carry it.
+
+    Sites outside CDSs are retained with an empty ``genes`` tuple.  A site that
+    overlaps several CDSs receives every assignment, as in the source R code.
+    """
+
+    input_sites = [_coerce_site(site) for site in sites]
+    annotation_contig = _resolve_annotation_contig(input_sites, contig)
+
+    prepared_genes: list[tuple[int, int, GeneAssignment]] = []
+    for gene in genes:
+        start = _coerce_position(_value(gene, "start"), "gene start")
+        end = _coerce_position(_value(gene, "end"), "gene end")
+        if end < start:
+            raise ValueError(f"gene end ({end}) is before start ({start})")
+        raw_strand = _value(gene, "strand")
+        strand = _coerce_strand(raw_strand)
+        supplied_id = gene_id_getter(gene) if gene_id_getter is not None else _optional_value(gene, "locus")
+        if supplied_id is None or not str(supplied_id).strip():
+            if not annotation_contig:
+                raise ValueError(
+                    "contig is required to create fallback gene IDs for genes without a locus tag"
+                )
+            # Keep this exactly compatible with genome.gene_identifier(), whose
+            # ``Gene.strand`` is stored as +1/-1 rather than +/- symbols.
+            supplied_id = f"{annotation_contig}:{start}-{end}:{raw_strand}"
+        prepared_genes.append((start, end, GeneAssignment(str(supplied_id), strand)))
+
+    annotated: list[AnnotatedInsertionSite] = []
+    for site in input_sites:
+        if annotation_contig and site.contig and site.contig != annotation_contig:
+            raise ValueError(
+                f"site contig {site.contig!r} does not match annotation contig {annotation_contig!r}"
+            )
+        site_contig = site.contig or annotation_contig
+        assignments = tuple(
+            assignment
+            for start, end, assignment in prepared_genes
+            if start <= site.position <= end
+        )
+        annotated.append(
+            AnnotatedInsertionSite(
+                position=site.position,
+                read_count=site.read_count,
+                contig=site_contig,
+                genes=assignments,
+            )
+        )
+    return annotated
+
+
+def classify_genes(
+    sites: Iterable[AnnotatedInsertionSite],
+    *,
+    classifier: GeneClassifier | None = None,
+) -> ClassificationResult:
+    """Classify genes using the audited R workflow or a supplied classifier.
+
+    The pooled read threshold is the R default ``quantile(positive_counts,
+    0.50)`` after sites are flattened across overlapping genes.  When
+    ``classifier`` is provided, R statistics and ``initial_call`` are still
+    calculated, but its return value replaces every ``final_call``.
+    """
+
+    groups = _group_sites(sites)
+    positive_counts = [
+        row.read_count
+        for rows in groups.values()
+        for row in rows
+        if row.read_count > 0
+    ]
+    read_threshold = _r_quantile(positive_counts, 0.50)
+
+    calls: list[GeneClassification] = []
+    for (contig, gene_id), rows in groups.items():
+        strand = rows[0].strand  # R uses unique(gene_data$strand)[1].
+        total_sites = len(rows)
+        hits = sum(row.read_count > 0 for row in rows)
+        saturation = hits / total_sites
+        initial_call, final_call = _r_classify_gene(rows, read_threshold)
+
+        if classifier is not None:
+            try:
+                custom_call = classifier(gene_id, tuple(rows))
+            except Exception as exc:  # noqa: BLE001 - add gene context to user code errors
+                raise RuntimeError(
+                    f"custom classifier failed for {contig}:{gene_id}"
+                ) from exc
+            final_call = _validate_custom_call(custom_call)
+
+        calls.append(
+            GeneClassification(
+                contig=contig,
+                gene_id=gene_id,
+                strand=strand,
+                total_sites=total_sites,
+                hits=hits,
+                saturation=saturation,
+                initial_call=initial_call,
+                final_call=final_call,
+            )
+        )
+
+    return ClassificationResult(calls=tuple(calls), read_threshold=read_threshold)
+
+
+def load_classifier(path: str | Path) -> GeneClassifier:
+    """Load ``classify_gene(gene_id, site_rows)`` from a trusted local ``.py`` file.
+
+    The file is intentionally loaded as ordinary Python, so it has the same
+    privileges as the process running this application.
+    """
+
+    source = Path(path).expanduser().resolve()
+    if not source.is_file():
+        raise FileNotFoundError(f"custom classifier file not found: {source}")
+    if source.suffix.lower() != ".py":
+        raise ValueError(f"custom classifier must be a .py file: {source}")
+
+    digest = hashlib.sha256(str(source).encode("utf-8")).hexdigest()[:16]
+    module_name = f"_phage_tnseq_custom_classifier_{digest}"
+    spec = importlib.util.spec_from_file_location(module_name, source)
+    if spec is None or spec.loader is None:  # pragma: no cover - defensive importlib guard
+        raise ImportError(f"could not create an import specification for {source}")
+    module = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(module)
+    except Exception as exc:  # noqa: BLE001 - show the source file in the error
+        raise RuntimeError(f"could not load custom classifier {source}") from exc
+
+    classifier = getattr(module, "classify_gene", None)
+    if not callable(classifier):
+        raise ValueError(
+            f"custom classifier {source} must define callable "
+            "classify_gene(gene_id, site_rows)"
+        )
+    return classifier
+
+
+def apply_classifier(
+    sites: Iterable[AnnotatedInsertionSite],
+    classifier: GeneClassifier,
+) -> ClassificationResult:
+    """Apply a loaded/custom classifier while retaining standard site statistics."""
+
+    return classify_genes(sites, classifier=classifier)
+
+
+def consensus_calls(
+    replicates: Sequence[Sequence[GeneClassification] | ClassificationResult],
+    *,
+    min_votes: int = 3,
+) -> tuple[ConsensusCall, ...]:
+    """Return deterministic consensus calls across subsampling replicates.
+
+    The supplied R script assumes five replicates and accepts a label seen at
+    least three times.  Those are the defaults here.  Missing/``None`` calls do
+    not count as a label, and a tie is reported as ``Ambiguous`` rather than
+    inheriting input-order behaviour from R's ``slice_head``.
+    """
+
+    if min_votes < 1:
+        raise ValueError("min_votes must be at least 1")
+
+    normalised: list[dict[tuple[str, str], str | None]] = []
+    all_keys: set[tuple[str, str]] = set()
+    for replicate_index, replicate in enumerate(replicates, start=1):
+        source_calls = replicate.calls if isinstance(replicate, ClassificationResult) else replicate
+        by_gene: dict[tuple[str, str], str | None] = {}
+        for call in source_calls:
+            if not isinstance(call, GeneClassification):
+                raise TypeError(
+                    "replicates must contain GeneClassification sequences or ClassificationResult objects"
+                )
+            key = (call.contig, call.gene_id)
+            if key in by_gene:
+                raise ValueError(
+                    f"replicate {replicate_index} contains duplicate gene {call.contig}:{call.gene_id}"
+                )
+            by_gene[key] = call.final_call
+            all_keys.add(key)
+        normalised.append(by_gene)
+
+    results: list[ConsensusCall] = []
+    for contig, gene_id in sorted(all_keys):
+        per_replicate = tuple(replicate.get((contig, gene_id)) for replicate in normalised)
+        votes = Counter(call for call in per_replicate if call is not None)
+        if not votes:
+            consensus = AMBIGUOUS
+            support = 0
+        else:
+            support = max(votes.values())
+            leaders = [label for label, count in votes.items() if count == support]
+            consensus = leaders[0] if len(leaders) == 1 and support >= min_votes else AMBIGUOUS
+        results.append(
+            ConsensusCall(
+                contig=contig,
+                gene_id=gene_id,
+                consensus_call=consensus,
+                votes=support,
+                n_replicates=len(normalised),
+                replicate_calls=per_replicate,
+            )
+        )
+    return tuple(results)
+
+
+def _group_sites(
+    sites: Iterable[AnnotatedInsertionSite],
+) -> dict[tuple[str, str], list[GeneSiteRow]]:
+    """Flatten overlapping gene annotations exactly as the R input does."""
+
+    groups: dict[tuple[str, str], list[GeneSiteRow]] = {}
+    for site in sites:
+        annotated = _coerce_annotated_site(site)
+        for assignment in annotated.genes:
+            key = (annotated.contig, assignment.gene_id)
+            groups.setdefault(key, []).append(
+                GeneSiteRow(
+                    contig=annotated.contig,
+                    gene_id=assignment.gene_id,
+                    strand=assignment.strand,
+                    position=annotated.position,
+                    read_count=annotated.read_count,
+                )
+            )
+    return groups
+
+
+def _r_classify_gene(
+    rows: Sequence[GeneSiteRow], read_threshold: float | None
+) -> tuple[str | None, str | None]:
+    """Port one gene's classification from the supplied R script."""
+
+    total_sites = len(rows)
+    hits = sum(row.read_count > 0 for row in rows)
+    saturation = hits / total_sites
+
+    if total_sites <= 5:
+        return None, None
+    if saturation < 0.2:
+        return ESSENTIAL, ESSENTIAL
+    if saturation > 0.8:
+        return NON_ESSENTIAL, NON_ESSENTIAL
+
+    # ``Further analysis`` is R's temporary label; every qualifying gene then
+    # receives either Essential or Intermediate from classify_gene().
+    initial_call = FURTHER_ANALYSIS
+    strand = rows[0].strand
+    hit_positions = [row.position for row in rows if row.read_count > 0]
+    positions = [row.position for row in rows]
+    position_threshold = _r_quantile(positions, 0.80 if strand == "+" else 0.20)
+    median_hit_position = _r_quantile(hit_positions, 0.50)
+
+    if (
+        strand == "+" and median_hit_position is not None and position_threshold is not None
+        and median_hit_position >= position_threshold
+    ):
+        final_call = ESSENTIAL
+    elif (
+        strand == "-" and median_hit_position is not None and position_threshold is not None
+        and median_hit_position <= position_threshold
+    ):
+        final_call = ESSENTIAL
+    else:
+        oriented = sorted(rows, key=lambda row: row.position, reverse=strand == "-")
+        midpoint = total_sites // 2
+        first_half = oriented[:midpoint]
+        second_half = oriented[midpoint:]
+        zeros_first = sum(row.read_count == 0 for row in first_half) / len(first_half)
+        zeros_second = sum(row.read_count == 0 for row in second_half) / len(second_half)
+        if (zeros_first > 0.7 and zeros_second < 0.3) or (
+            zeros_second > 0.7 and zeros_first < 0.3
+        ):
+            final_call = ESSENTIAL
+        else:
+            final_call = INTERMEDIATE
+
+    # The two post-refinement adjustments mirror the R script's strict count
+    # comparisons and inclusive saturation windows.
+    positive_counts = [row.read_count for row in rows if row.read_count > 0]
+    if read_threshold is not None and 0.2 <= saturation <= 0.4:
+        prop_weak = sum(count < read_threshold for count in positive_counts) / len(positive_counts)
+        if prop_weak > 0.5 and final_call != ESSENTIAL:
+            final_call = STRONG_FITNESS_DEFECT
+    if read_threshold is not None and 0.7 <= saturation <= 0.8:
+        prop_strong = sum(count > read_threshold for count in positive_counts) / len(positive_counts)
+        if prop_strong > 0.5 and final_call != ESSENTIAL:
+            final_call = REDUCED_FITNESS
+
+    return initial_call, final_call
+
+
+def _r_quantile(values: Sequence[float], probability: float) -> float | None:
+    """R's default type-7 quantile, used by the supplied script."""
+
+    if not values:
+        return None
+    ordered = sorted(float(value) for value in values)
+    h = (len(ordered) - 1) * probability
+    low = math.floor(h)
+    high = math.ceil(h)
+    if low == high:
+        return ordered[low]
+    return ordered[low] + (h - low) * (ordered[high] - ordered[low])
+
+
+def _coerce_site(site: object) -> InsertionSite:
+    if isinstance(site, InsertionSite):
+        return site
+    return InsertionSite(
+        position=_value(site, "position"),
+        read_count=_value(site, "read_count"),
+        contig=_optional_value(site, "contig") or "",
+    )
+
+
+def _coerce_annotated_site(site: object) -> AnnotatedInsertionSite:
+    if isinstance(site, AnnotatedInsertionSite):
+        return site
+    return AnnotatedInsertionSite(
+        position=_value(site, "position"),
+        read_count=_value(site, "read_count"),
+        contig=_optional_value(site, "contig") or "",
+        genes=tuple(_value(site, "genes")),
+    )
+
+
+def _resolve_annotation_contig(sites: Sequence[InsertionSite], contig: str | None) -> str:
+    if contig is not None:
+        return _coerce_contig(contig)
+    present = {site.contig for site in sites if site.contig}
+    if len(present) > 1:
+        raise ValueError(
+            "annotate one contig at a time, or pass a single matching contig explicitly"
+        )
+    return next(iter(present), "")
+
+
+def _value(record: object, name: str) -> Any:
+    value = _optional_value(record, name)
+    if value is None:
+        raise ValueError(f"record is missing required field {name!r}")
+    return value
+
+
+def _optional_value(record: object, name: str) -> Any | None:
+    if isinstance(record, Mapping):
+        return record.get(name)
+    return getattr(record, name, None)
+
+
+def _coerce_position(value: object, label: str) -> int:
+    if isinstance(value, bool):
+        raise ValueError(f"{label} must be a positive integer, not bool")
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{label} must be a positive integer: {value!r}") from exc
+    if not math.isfinite(numeric) or not numeric.is_integer() or numeric < 1:
+        raise ValueError(f"{label} must be a positive integer: {value!r}")
+    return int(numeric)
+
+
+def _coerce_read_count(value: object) -> float:
+    if isinstance(value, bool):
+        raise ValueError("read_count must be a non-negative number, not bool")
+    try:
+        count = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"read_count must be a non-negative number: {value!r}") from exc
+    if not math.isfinite(count) or count < 0:
+        raise ValueError(f"read_count must be a non-negative number: {value!r}")
+    return count
+
+
+def _coerce_contig(value: object) -> str:
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def _coerce_gene_id(value: object) -> str:
+    if value is None or not str(value).strip():
+        raise ValueError("gene_id must be a non-empty string")
+    return str(value).strip()
+
+
+def _coerce_strand(value: object) -> str:
+    if value in (1, "+1"):
+        return "+"
+    if value in (-1, "-1"):
+        return "-"
+    text = str(value).strip()
+    if text == "+":
+        return "+"
+    if text == "-":
+        return "-"
+    raise ValueError(f"strand must be '+', '-', +1, or -1: {value!r}")
+
+
+def _validate_custom_call(value: object) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("custom classify_gene() must return a non-empty str or None")
+    return value.strip()
+
+
+__all__ = [
+    "AMBIGUOUS",
+    "ESSENTIAL",
+    "FURTHER_ANALYSIS",
+    "INTERMEDIATE",
+    "NON_ESSENTIAL",
+    "REDUCED_FITNESS",
+    "STRONG_FITNESS_DEFECT",
+    "AnnotatedInsertionSite",
+    "ClassificationResult",
+    "ConsensusCall",
+    "GeneAssignment",
+    "GeneClassification",
+    "GeneClassifier",
+    "GeneSiteRow",
+    "InsertionSite",
+    "annotate_sites_with_genes",
+    "apply_classifier",
+    "classify_genes",
+    "consensus_calls",
+    "load_classifier",
+]
