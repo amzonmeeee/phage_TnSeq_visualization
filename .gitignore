@@ -9,8 +9,11 @@ dist/
 .venv/
 venv/
 
-# Example folder & generated outputs
-examples/
+# Generated example data and rendered outputs. Keep reproducible example source
+# scripts under version control while leaving their GBK/CSV products ignored.
+examples/*
+!examples/make_example.py
+!examples/custom_classifier_template.py
 *.png
 *.svg
 

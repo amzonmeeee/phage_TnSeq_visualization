@@ -1,0 +1,37 @@
+{
+  "format_version": 1,
+  "reference": "/Users/jensen/Downloads/phynteny.gbk",
+  "reference_sha256": "a22a6c5c65dc9cedcc89853d530e50400f3eca8959733f127fcd44e3168267e1",
+  "contigs": [
+    {
+      "id": "Vibrio",
+      "length_bp": 39422
+    }
+  ],
+  "candidate_model": "Himar1/mariner TA",
+  "coordinate_system": "1-based position of the T in each TA dinucleotide",
+  "candidate_sites": 1580,
+  "positive_sites": 823,
+  "requested_read_pairs": 5000,
+  "generated_read_pairs": 5000,
+  "read_length": 150,
+  "insert_size": 300,
+  "insert_jitter": 30,
+  "r1_terminal_primer": "ACTTATCAGCCAACCTGTTA",
+  "seed": 3900,
+  "files": {
+    "final-dataset.csv": {
+      "sha256": "5e674605345957423a0214233fca393ceeb3e88babf1e20e6c83330b46fec7e6",
+      "bytes": 24997
+    },
+    "mock_reads1.fastq.gz": {
+      "sha256": "8835c4c8fe9031e24eebc527fd168d107908715a7bcf5e53f2a8c94e36ab59cf",
+      "bytes": 58598
+    },
+    "mock_reads2.fastq.gz": {
+      "sha256": "dbacc13d43ad189631d112dcce1dfa0d7bac9212d084520fe6c91586599f5db1",
+      "bytes": 76701
+    }
+  },
+  "warning": "Synthetic smoke-test data only; validate the real transposon primer and library architecture before biological interpretation."
+}

@@ -47,6 +47,22 @@ class GenomeRecord:
         return len(self.genes)
 
 
+def gene_identifier(gene: Gene, *, contig: str | None = None) -> str:
+    """Return the stable identifier used to join genes to Tn-Seq results.
+
+    GenBank ``locus_tag`` (or the ``ID`` / ``label`` already stored in
+    :attr:`Gene.locus`) is preferred.  Some phage annotations do not supply one;
+    a coordinate-and-strand fallback is deterministic within a contig and keeps
+    those CDS features usable in a final-dataset CSV.  Pass ``contig`` when an
+    identifier might be stored outside a per-contig mapping, as the essentiality
+    module does.
+    """
+    if gene.locus:
+        return gene.locus
+    prefix = f"{contig}:" if contig else ""
+    return f"{prefix}{gene.start}-{gene.end}:{gene.strand}"
+
+
 # Qualifier keys that, when present, flag a CDS as a VF/AMR/ACR/DefenseFinder hit.
 _VFDB_AMR_KEYS = ("vfdb", "card", "amr", "acr", "defensefinder", "acrdb")
 

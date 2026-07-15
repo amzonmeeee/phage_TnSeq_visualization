@@ -1,0 +1,52 @@
+contig,gene_id,strand,total_candidate_sites,hit_sites,saturation,initial_call,final_call,read_count_median_threshold
+Vibrio,LJRIAVXO_CDS_0001,+,23,20,0.869565,Non-essential,Non-essential,5
+Vibrio,LJRIAVXO_CDS_0002,+,81,8,0.0987654,Essential,Essential,5
+Vibrio,LJRIAVXO_CDS_0003,+,56,34,0.607143,Further analysis,Intermediate,5
+Vibrio,LJRIAVXO_CDS_0004,+,12,12,1,Non-essential,Non-essential,5
+Vibrio,LJRIAVXO_CDS_0005,+,10,3,0.3,Further analysis,Intermediate,5
+Vibrio,LJRIAVXO_CDS_0006,+,21,17,0.809524,Non-essential,Non-essential,5
+Vibrio,LJRIAVXO_CDS_0007,+,42,4,0.0952381,Essential,Essential,5
+Vibrio,LJRIAVXO_CDS_0008,+,11,8,0.727273,Further analysis,Intermediate,5
+Vibrio,LJRIAVXO_CDS_0009,+,36,29,0.805556,Non-essential,Non-essential,5
+Vibrio,LJRIAVXO_CDS_0010,+,22,9,0.409091,Further analysis,Intermediate,5
+Vibrio,LJRIAVXO_CDS_0011,+,23,22,0.956522,Non-essential,Non-essential,5
+Vibrio,LJRIAVXO_CDS_0012,+,15,2,0.133333,Essential,Essential,5
+Vibrio,LJRIAVXO_CDS_0013,+,81,39,0.481481,Further analysis,Intermediate,5
+Vibrio,LJRIAVXO_CDS_0014,+,89,66,0.741573,Further analysis,Intermediate,5
+Vibrio,LJRIAVXO_CDS_0015,+,15,3,0.2,Further analysis,Strong fitness defect,5
+Vibrio,LJRIAVXO_CDS_0016,+,79,69,0.873418,Non-essential,Non-essential,5
+Vibrio,LJRIAVXO_CDS_0017,+,42,3,0.0714286,Essential,Essential,5
+Vibrio,LJRIAVXO_CDS_0018,+,86,39,0.453488,Further analysis,Intermediate,5
+Vibrio,LJRIAVXO_CDS_0019,+,54,38,0.703704,Further analysis,Intermediate,5
+Vibrio,LJRIAVXO_CDS_0020,+,67,18,0.268657,Further analysis,Intermediate,5
+Vibrio,LJRIAVXO_CDS_0021,-,12,12,1,Non-essential,Non-essential,5
+Vibrio,LJRIAVXO_CDS_0022,-,14,2,0.142857,Essential,Essential,5
+Vibrio,LJRIAVXO_CDS_0023,-,5,2,0.4,,,5
+Vibrio,LJRIAVXO_CDS_0024,-,20,18,0.9,Non-essential,Non-essential,5
+Vibrio,LJRIAVXO_CDS_0025,-,14,6,0.428571,Further analysis,Essential,5
+Vibrio,LJRIAVXO_CDS_0026,-,43,42,0.976744,Non-essential,Non-essential,5
+Vibrio,LJRIAVXO_CDS_0027,-,73,4,0.0547945,Essential,Essential,5
+Vibrio,LJRIAVXO_CDS_0028,-,66,29,0.439394,Further analysis,Intermediate,5
+Vibrio,LJRIAVXO_CDS_0029,-,16,13,0.8125,Non-essential,Non-essential,5
+Vibrio,LJRIAVXO_CDS_0030,-,20,6,0.3,Further analysis,Intermediate,5
+Vibrio,LJRIAVXO_CDS_0031,-,22,21,0.954545,Non-essential,Non-essential,5
+Vibrio,LJRIAVXO_CDS_0032,-,18,3,0.166667,Essential,Essential,5
+Vibrio,LJRIAVXO_CDS_0033,-,56,24,0.428571,Further analysis,Intermediate,5
+Vibrio,LJRIAVXO_CDS_0034,-,14,12,0.857143,Non-essential,Non-essential,5
+Vibrio,LJRIAVXO_CDS_0035,-,32,10,0.3125,Further analysis,Strong fitness defect,5
+Vibrio,LJRIAVXO_CDS_0036,-,23,22,0.956522,Non-essential,Non-essential,5
+Vibrio,LJRIAVXO_CDS_0037,-,19,5,0.263158,Further analysis,Intermediate,5
+Vibrio,LJRIAVXO_CDS_0038,-,20,9,0.45,Further analysis,Intermediate,5
+Vibrio,LJRIAVXO_CDS_0039,-,26,20,0.769231,Further analysis,Intermediate,5
+Vibrio,LJRIAVXO_CDS_0040,-,8,2,0.25,Further analysis,Strong fitness defect,5
+Vibrio,LJRIAVXO_CDS_0041,-,21,19,0.904762,Non-essential,Non-essential,5
+Vibrio,LJRIAVXO_CDS_0042,-,7,0,0,Essential,Essential,5
+Vibrio,LJRIAVXO_CDS_0043,-,13,6,0.461538,Further analysis,Intermediate,5
+Vibrio,LJRIAVXO_CDS_0044,-,20,16,0.8,Further analysis,Intermediate,5
+Vibrio,LJRIAVXO_CDS_0045,-,11,2,0.181818,Essential,Essential,5
+Vibrio,LJRIAVXO_CDS_0046,-,21,19,0.904762,Non-essential,Non-essential,5
+Vibrio,LJRIAVXO_CDS_0047,-,4,0,0,,,5
+Vibrio,LJRIAVXO_CDS_0048,-,7,3,0.428571,Further analysis,Essential,5
+Vibrio,LJRIAVXO_CDS_0049,-,2,2,1,,,5
+Vibrio,LJRIAVXO_CDS_0050,-,11,2,0.181818,Essential,Essential,5
+Vibrio,LJRIAVXO_CDS_0051,-,22,21,0.954545,Non-essential,Non-essential,5
