@@ -159,6 +159,7 @@ def _add_plot_arguments(p: argparse.ArgumentParser) -> None:
     g_name.add_argument("--name", default=None, help="Override genome name/accession shown on plot.")
     g_name.add_argument("--no-orf-finder", action="store_true", help="Do not call de-novo ORFs when GenBank has no CDS.")
     g_name.add_argument("--no-legend", action="store_true", help="Hide legends.")
+    g_name.add_argument("--no-read-legend", action="store_true", help="Hide the numeric read-count scale beside the histogram (shown by default).")
     g_name.add_argument("--small-title", action="store_true", help="Show a small label beside first row instead of large title.")
 
     g_tracks = p.add_argument_group("optional tracks")
@@ -198,8 +199,8 @@ def _run_plot(args: argparse.Namespace) -> int:
     _require_file(reference, "input genome")
     transposon = _resolve_transposon_or_raise(args.transposon)
     records = _load_records(reference, args.name, args.no_orf_finder)
-    insertion_sites, draw_insertions = _theoretical_sites(records, transposon, args)
-    options = _plot_options(args, draw_insertions)
+    insertion_sites = _theoretical_sites(records, transposon, args)
+    options = _plot_options(args, bool(insertion_sites))
     output = Path(args.output)
 
     if not args.final_dataset:
@@ -342,17 +343,26 @@ def _load_records(reference: Path, name: str | None, no_orf_finder: bool) -> lis
 
 def _theoretical_sites(
     records: list[GenomeRecord], transposon: Transposon, args: argparse.Namespace
-) -> tuple[dict[str, list[int]], bool]:
+) -> dict[str, list[int]]:
+    """Compute candidate insertion sites for the tick and/or density tracks.
+
+    Returns the ``{accession: [positions]}`` mapping (empty when unavailable). Whether the
+    red ticks and the density heat strip are actually *drawn* is decided independently in
+    ``_plot_options`` — both are derived from this one mapping, so ``--no-insertion-sites``
+    can hide the ticks while the density track stays on, and ``--no-insertion-density``
+    the reverse. Only skip the computation when neither track will be drawn.
+    """
     # A processed-data map is intentionally centred on measured blue read bars.
-    # The dense red candidate-site track remains available, but is legacy
+    # The dense red candidate-site tracks remain available, but are legacy
     # pre-visualisation output rather than a useful default at this stage.
     if args.final_dataset and not args.show_theoretical_sites:
-        return {}, False
-    draw = not args.no_insertion_sites
-    if not draw or not transposon.has_preference:
-        if draw and not transposon.has_preference:
-            print(f"  • {transposon.name}: no finite motif preference; theoretical ticks skipped.")
-        return {}, False
+        return {}
+    if args.no_insertion_sites and args.no_insertion_density:
+        return {}
+    if not transposon.has_preference:
+        if not args.no_insertion_sites:
+            print(f"  • {transposon.name}: no finite motif preference; theoretical sites skipped.")
+        return {}
     sites = {
         record.accession: find_insertion_sites(
             record.sequence, transposon.motif or "", both_strands=not args.single_strand
@@ -361,10 +371,10 @@ def _theoretical_sites(
     }
     for accession, positions in sites.items():
         print(f"  • {accession}: {len(positions):,} candidate {transposon.motif} sites")
-    return sites, True
+    return sites
 
 
-def _plot_options(args: argparse.Namespace, draw_insertions: bool) -> PlotOptions:
+def _plot_options(args: argparse.Namespace, sites_available: bool) -> PlotOptions:
     return PlotOptions(
         fig_width=args.width,
         track_height=args.track_height,
@@ -375,8 +385,8 @@ def _plot_options(args: argparse.Namespace, draw_insertions: bool) -> PlotOption
         force_rows=args.rows,
         dpi=args.dpi,
         transparent=args.transparent,
-        show_insertion_sites=draw_insertions,
-        show_insertion_density=not args.no_insertion_density and draw_insertions,
+        show_insertion_sites=sites_available and not args.no_insertion_sites,
+        show_insertion_density=sites_available and not args.no_insertion_density,
         show_read_histogram=not args.no_read_histogram,
         show_gc_content=args.gc_content,
         show_gc_skew=args.gc_skew,
@@ -384,6 +394,7 @@ def _plot_options(args: argparse.Namespace, draw_insertions: bool) -> PlotOption
         gc_window=args.gc_window,
         density_window=args.density_window,
         show_legend=not args.no_legend,
+        show_read_legend=not args.no_read_legend,
         big_title=not args.small_title,
     )
 

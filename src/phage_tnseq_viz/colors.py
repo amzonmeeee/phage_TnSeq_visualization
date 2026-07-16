@@ -52,16 +52,18 @@ DEFAULT_CATEGORY = "unknown function"
 
 # Gene-arrow fill colours for the built-in Harms-lab saturation classifier.
 #
-# These intentionally use a separate, colour-blind-friendly palette from the
-# PHROG palette above: PHROG remains the *border* colour, whereas these colours
-# communicate the experimental Tn-Seq call in the arrow fill.  Unknown custom
-# calls retain a neutral grey rather than silently borrowing a biological call.
+# PHROG stays the *border* colour; the arrow *fill* communicates the Tn-Seq call.
+# The biological calls run as a single warm sequential ramp from deep red
+# (essential) through orange and yellow to white (non-essential) — depletion reads
+# as "hotter", tolerance fades to blank — so no out-of-scale hue (the old green /
+# blue) interrupts the ramp.  The non-call states stay a neutral grey, kept off the
+# ramp so "no data" is never mistaken for a fitness level.
 ESSENTIALITY_COLORS: dict[str, str] = {
     "Essential": "#d73027",
     "Strong fitness defect": "#fc8d59",
     "Intermediate": "#fee08b",
-    "Reduced fitness": "#91bfdb",
-    "Non-essential": "#1a9850",
+    "Reduced fitness": "#ffffbf",
+    "Non-essential": "#fffde0",
     "Ambiguous": "#9e9e9e",
     "Insufficient sites": "#d9d9d9",
     "Unclassified": "#bdbdbd",

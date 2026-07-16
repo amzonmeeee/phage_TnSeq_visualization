@@ -58,11 +58,20 @@ TRNA_COLOR = "#111111"
 # it matches the neighbouring arrow bodies.
 ARROW_SHAFT_RATIO = 1.0
 
-# Sub-track heights relative to the gene-arrow lane (1.0 = same thickness as the
-# arrows). The insertion ticks are matched to the arrow height on purpose so the
-# arrows read as slim bars rather than a dominating block.
-INSERTION_TRACK_RATIO = 1.0
-DENSITY_TRACK_RATIO = 1.15
+# Arrow geometry and the data lanes matched to it. pyGenomeViz draws gene arrows
+# across data y in [-ARROW_HALF, ARROW_HALF]. The insertion (red) tick lane, the
+# density (heat) lane, and a maximal read-count bar are all sized so that a
+# full-height element equals the *drawn* arrow height — the arrow, the red ticks and
+# the heat strip end up the same thickness.
+ARROW_HALF = 1.0
+# Data-unit clearance kept beyond each arrow edge so the thick border stroke does not
+# bleed into the neighbouring lane (the red ticks below / the histogram baseline above).
+LANE_BORDER_PAD = 0.55
+# The read-count histogram sits this far above the arrow top, and its tallest bar
+# reaches READ_HIST_AMPLITUDE data units — 3 arrow heights (arrow height = 2 * ARROW_HALF).
+READ_HIST_BASELINE_GAP = 0.55
+READ_HIST_AMPLITUDE = 6.0
+READ_HIST_LINEWIDTH = 0.9
 # GC content/skew are kept at their previous absolute height while the arrow lane
 # was halved, so their ratio (relative to the now-thin arrow lane) is doubled.
 GC_TRACK_RATIO = 2.3
@@ -125,6 +134,7 @@ class PlotOptions:
     read_histogram_color: str = "#1677ff"
     gene_fill: str = "#000000"       # used when no essentiality calls are supplied
     show_legend: bool = True
+    show_read_legend: bool = True    # numeric read-count scale beside the histogram
     big_title: bool = True           # genome name as a big heading on top
                                      # (False = small label beside the first row)
 
@@ -290,6 +300,21 @@ def render(
         if positive_counts:
             read_count_max[rec.accession] = max(positive_counts)
 
+    # Vertical layout of the gene-arrow axis (data units). The arrow spans
+    # [-ARROW_HALF, ARROW_HALF]; a border-clearance pad is kept on each side, and the
+    # read histogram (when present) claims headroom above. `arrow_fraction` is the share
+    # of the axis the arrow itself takes, which the red/heat lanes are matched to so all
+    # three read the same thickness.
+    has_read_histogram = bool(options.show_read_histogram and read_count_max)
+    arrow_y_lo = -(ARROW_HALF + LANE_BORDER_PAD)
+    if has_read_histogram:
+        read_hist_base = ARROW_HALF + READ_HIST_BASELINE_GAP
+        arrow_y_hi = read_hist_base + READ_HIST_AMPLITUDE
+    else:
+        read_hist_base = None
+        arrow_y_hi = ARROW_HALF + LANE_BORDER_PAD
+    arrow_fraction = (2.0 * ARROW_HALF) / (arrow_y_hi - arrow_y_lo)
+
     # Keep references (keyed by genome + row index) so we can draw on the
     # sub-track axes after plotfig(), and remember each row's coordinate window.
     insertion_subtracks: dict[tuple[str, int], object] = {}
@@ -364,11 +389,11 @@ def render(
 
             if options.show_insertion_sites and insertion_sites.get(rec.accession):
                 insertion_subtracks[key] = track.add_subtrack(
-                    f"ins:{rec.accession}:{idx}", ratio=INSERTION_TRACK_RATIO, ylim=(0, 1)
+                    f"ins:{rec.accession}:{idx}", ratio=arrow_fraction, ylim=(0, 1)
                 )
             if rec.accession in density_signal:
                 density_subtracks[key] = track.add_subtrack(
-                    f"dens:{rec.accession}:{idx}", ratio=DENSITY_TRACK_RATIO, ylim=(0, 1)
+                    f"dens:{rec.accession}:{idx}", ratio=arrow_fraction, ylim=(0, 1)
                 )
             if options.show_gc_content:
                 gc_content_subtracks[key] = track.add_subtrack(
@@ -394,10 +419,16 @@ def render(
             )
 
     # ---- draw signals on sub-track axes (only available after plotfig) ----
-    # Keep the read histogram in the same main axis as its arrows.  Extending the
-    # upper y-limit creates a lane *above* the arrows even for wrapped genomes,
-    # rather than adding a pyGenomeViz subtrack (which is always placed below).
-    has_read_histogram = bool(options.show_read_histogram and read_count_max)
+    # Set the shared vertical range on every gene-arrow axis: pad below/above the arrow
+    # so its thick border clears the neighbouring lanes, and (with sequencing data) make
+    # room above for the read histogram. All rows share one range so arrows line up.
+    for track in row_tracks.values():
+        track.ax.set_ylim(arrow_y_lo, arrow_y_hi)
+
+    # Keep the read histogram in the same main axis as its arrows: the headroom above
+    # the arrow top gives a lane *above* the arrows even for wrapped genomes, rather than
+    # a pyGenomeViz subtrack (which is always placed below). The tallest bar reaches one
+    # full arrow height so the busiest sites are legible instead of a thin fuzz.
     if has_read_histogram:
         for key, track in row_tracks.items():
             accession, _ = key
@@ -411,12 +442,22 @@ def render(
                 continue
             vmax = read_count_max[accession]
             xs = [track.transform_coord(position) for position, _ in values]
-            tops = [1.12 + 1.08 * (count / vmax) for _, count in values]
-            track.ax.set_ylim(-1.0, 2.35)
+            tops = [read_hist_base + READ_HIST_AMPLITUDE * (count / vmax) for _, count in values]
             track.ax.vlines(
-                xs, 1.08, tops, color=options.read_histogram_color,
-                lw=0.55, zorder=5,
+                xs, read_hist_base, tops, color=options.read_histogram_color,
+                lw=READ_HIST_LINEWIDTH, zorder=5,
             )
+        # A small vertical scale on the first row of each contig telling the reader how
+        # many reads the tallest bar stands for (the bars are otherwise unitless). This is
+        # the read-count "legend"; toggle it off with show_read_legend.
+        if options.show_read_legend:
+            for accession, vmax in read_count_max.items():
+                scale_track = row_tracks.get((accession, 0))
+                if scale_track is not None:
+                    _draw_read_scale(
+                        scale_track.ax, read_hist_base, arrow_y_hi, vmax,
+                        options.read_histogram_color,
+                    )
 
     density_mappable = None
     for key, sub in insertion_subtracks.items():
@@ -452,6 +493,7 @@ def render(
         essentiality_calls=present_essentiality_calls if gene_calls is not None else None,
         has_read_histogram=has_read_histogram,
         density_mappable=density_mappable,
+        arrow_fraction=arrow_fraction,
     )
 
     if options.paper and options.fit_page:
@@ -477,6 +519,32 @@ def _gc_step(window: int) -> int:
     """Sliding step for GC tracks — a small fraction of the window so the curve is
     finely sampled and smooth (phold-style) rather than coarsely polygonal."""
     return max(1, window // 10)
+
+
+def _draw_read_scale(ax, base: float, top: float, vmax: float, color: str) -> None:
+    """Draw a small "0 – N reads" vertical scale just right of a histogram row.
+
+    The read bars are drawn normalised (tallest = the contig's peak); this bar tells the
+    reader what that peak is in absolute reads, so the histogram carries a real unit.
+    Placed in blended coords (x in axes fraction, y in data) so it hugs the right spine
+    (an always-clear margin — the left one carries pyGenomeViz's row label) regardless of
+    the genome's bp scale.
+    """
+    trans = ax.get_yaxis_transform()
+    x = 1.006
+    tick = 0.004
+    ax.plot([x, x], [base, top], transform=trans, color=color, lw=1.3,
+            clip_on=False, zorder=6)
+    for y in (base, top):
+        ax.plot([x - tick, x + tick], [y, y], transform=trans, color=color, lw=1.3,
+                clip_on=False, zorder=6)
+    label = f"{int(round(vmax)):,}" if vmax >= 1 else f"{vmax:g}"
+    ax.text(x + 2 * tick, top, label, transform=trans, ha="left", va="center",
+            fontsize=7.5, color=color, clip_on=False)
+    ax.text(x + 2 * tick, base, "0", transform=trans, ha="left", va="center",
+            fontsize=7.5, color=color, clip_on=False)
+    ax.text(x + 8 * tick, (base + top) / 2, "reads", transform=trans, ha="center",
+            va="center", rotation=90, fontsize=7.5, color=color, clip_on=False)
 
 
 def _draw_window_row(sub, wt: WindowTrack, vmax: float, window, pos_c, neg_c) -> None:
@@ -600,7 +668,8 @@ def _draw_colorbar_cell(fig, mappable, x: float, top: float, width: float, heigh
 
 def _decorate(fig, records, options, *, present_categories, include_vfdb,
               include_denovo, transposon_label, insertion_site_count,
-              essentiality_calls, has_read_histogram, density_mappable):
+              essentiality_calls, has_read_histogram, density_mappable,
+              arrow_fraction=1.0):
     """Add the top title plus framed legend boxes and a density colorbar below.
 
     All decorations live in reserved top/bottom margins (never beside the plot),
@@ -642,7 +711,7 @@ def _decorate(fig, records, options, *, present_categories, include_vfdb,
         tn_l.append(lbl)
     if has_read_histogram:
         tn_h.append(Line2D([0], [0], color=options.read_histogram_color, lw=2.0))
-        tn_l.append("Read count per insertion site (relative scale)")
+        tn_l.append("Read count per insertion site (blue histogram)")
     if essentiality_calls is None:
         tn_h.append(Patch(facecolor="black", edgecolor="#000000", linewidth=1.0))
         tn_l.append("Gene fill = essentiality (no data yet)")
@@ -753,7 +822,11 @@ def _decorate(fig, records, options, *, present_categories, include_vfdb,
     # figure with few sub-tracks that fraction collapses, so grow the canvas until the
     # gene lane reaches its target. The ruler's drop scales with the height: iterate.
     lane_frac = _gene_lane_height_frac(fig)
-    lane_in = MIN_GENE_LANE_RATIO * options.track_height
+    # `_gene_lane_height_frac` measures the whole arrow *axis*, but only `arrow_fraction`
+    # of it is the drawn arrow (the rest is border pad and any histogram headroom). Pin
+    # the arrow itself to MIN_GENE_LANE_RATIO so it keeps the same thickness whether or
+    # not the read histogram is claiming space above it.
+    lane_in = MIN_GENE_LANE_RATIO * options.track_height / max(arrow_fraction, 1e-6)
     for _ in range(4):
         needed = top_in + bottom_in + lane_in / max(lane_frac, 1e-6)
         if height >= needed:
