@@ -5,10 +5,9 @@ into a linear genome map, a per-insertion-site CSV, and gene-level
 essentiality calls. It can either orchestrate optional raw-read processing or
 start directly from a final count table produced elsewhere.
 
-The tool is designed for transposon-enriched Illumina libraries: sheared
+The tool is designed for transposon-enriched Illumina libraries after sheared
 genomes, adapter ligation, transposon-specific PCR, and junction sequencing.
-It does not attempt to infer a non-standard IR–cargo–IR primer sequence; that
-sequence is an experimental input and must be supplied to TPP when needed.
+It does not attempt to infer a non-standard IR–cargo–IR primer sequence which is is an experimental input and must be supplied to TPP when needed.
 
 ## What is new in v0.2
 
@@ -20,7 +19,7 @@ sequence is an experimental input and must be supplied to TPP when needed.
   arrow borders.
 - Normalised site-level and gene-level CSV output, processing logs, and a
   reproducibility manifest.
-- A dependency-free implementation of the supplied Harms-lab R classification
+- A dependency-free implementation of the supplied Harms-lab R classification<sup>1</sup>
   rules, plus a documented custom classifier interface.
 
 ## The two input paths
@@ -42,7 +41,7 @@ same reads a second time with a separate BWA command.
 ## Installation
 
 ```bash
-git clone <this-repo>
+git clone https://github.com/amzonmeeee/phage_TnSeq_visualization
 cd phage_TnSeq_visualization
 pip install .
 ```
@@ -98,7 +97,7 @@ phage-tnseq-viz plot phold_annotated_phage.gbk \
 ```
 
 With final data, the plot defaults to the requested blue measured-count bars
-and essentiality arrows. The older dense theoretical insertion-site track is
+and essentiality gene arrows. The older dense theoretical insertion-site track is
 off by default; add `--show-theoretical-sites` if you want it too. Remove the
 blue bars with `--no-read-histogram`.
 
@@ -216,8 +215,8 @@ TPP mismatch allowance, count cutoff, and depth-matching settings, add
 phage-tnseq-viz process reference.gbk --reads1 R1.fq.gz --reads2 R2.fq.gz --interactive
 ```
 
-All answers have CLI equivalents and are written to `processing_manifest.json`;
-interactive mode is a convenience, not a hidden configuration format.
+All answers have CLI equivalents and are written to `processing_manifest.json`.
+Interactive mode is a convenience, not a hidden configuration format.
 
 ### Read-count threshold and cross-phage depth matching
 
@@ -244,7 +243,7 @@ assumed to be alignable.
 ## Essentiality classification and colours
 
 The built-in classifier is a faithful, dependency-free port of the supplied
-`essentiality_classification.R` logic. Intergenic sites are retained in the
+`essentiality_classification.R` logic<sup>1</sup>. Intergenic sites are retained in the
 site CSV but excluded from gene calls; an overlapping site contributes to each
 overlapping CDS.
 
@@ -258,8 +257,8 @@ overlapping CDS.
 | Saturation 0.70–0.80; >50% positive sites above that median | Reduced fitness (unless Essential) |
 
 Saturation is `positive candidate sites / all candidate sites`. Arrow fills use
-red (Essential), orange (Strong fitness defect), pale yellow (Intermediate),
-light blue (Reduced fitness), green (Non-essential), and grey for
+maroon (Essential), red (Strong fitness defect), orange (Intermediate),
+amber (Reduced fitness), cream (Non-essential), and grey for
 insufficient/ambiguous calls. Arrow borders continue to use the phold/pharokka
 PHROG functional-category palette, so functional annotation and fitness call
 remain independently readable.
@@ -310,6 +309,14 @@ FastQC, fastp, TRANSIT, BWA, or SeqKit binaries:
 ```bash
 pytest
 ```
+
+## References
+
+1. Humolli D, Ransome J, Piel D, Veening JW, Harms A. Systematic mapping of bacteriophage gene essentiality with HIDEN‑SEQ. _bioRxiv (Cold Spring Harbor Laboratory)_. Published online November 20, 2025. doi:10.1101/2025.11.20.689424
+
+## Citation
+
+If you want to cite this tool, please site blahblahblah.
 
 ## License
 

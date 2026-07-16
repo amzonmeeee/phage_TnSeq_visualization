@@ -59,11 +59,11 @@ DEFAULT_CATEGORY = "unknown function"
 # blue) interrupts the ramp.  The non-call states stay a neutral grey, kept off the
 # ramp so "no data" is never mistaken for a fitness level.
 ESSENTIALITY_COLORS: dict[str, str] = {
-    "Essential": "#d73027",
-    "Strong fitness defect": "#fc8d59",
-    "Intermediate": "#fee08b",
-    "Reduced fitness": "#ffffbf",
-    "Non-essential": "#fffde0",
+    "Essential": "#800026",              # dark red (maroon)
+    "Strong fitness defect": "#e31a1c",  # red
+    "Intermediate": "#fd8d3c",           # orange
+    "Reduced fitness": "#fed330",        # amber (golden yellow)
+    "Non-essential": "#fff7bc",          # cream (off-white)
     "Ambiguous": "#9e9e9e",
     "Insufficient sites": "#d9d9d9",
     "Unclassified": "#bdbdbd",

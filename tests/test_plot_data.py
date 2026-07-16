@@ -30,7 +30,7 @@ def test_render_final_dataset_overlays_read_histogram_and_essentiality(tmp_path:
     svg = output.read_text(encoding="utf-8")
     assert output.exists()
     assert "#1677ff" in svg  # blue per-site read-count histogram
-    assert "#d73027" in svg  # essential gene-arrow fill
+    assert "#800026" in svg  # essential gene-arrow fill (dark-red end of the ramp)
     assert "Tn-Seq data &amp; essentiality" in svg
 
 
