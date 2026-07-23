@@ -346,3 +346,109 @@ def test_custom_classifier_still_overrides_the_binomial_supplement() -> None:
     result = classify_genes(rows, classifier=lambda gene_id, site_rows: "mine")
 
     assert {call.final_call for call in result.calls} == {"mine"}
+
+
+def _library_with(*genes: list[AnnotatedInsertionSite]) -> list[AnnotatedInsertionSite]:
+    """Genes of interest plus a well-hit filler gene that sets library saturation."""
+
+    rows = _annotated_rows("filler", "+", [50.0] * 60, start=1000)
+    for gene in genes:
+        rows = rows + gene
+    return rows
+
+
+def test_gap_analysis_separates_contiguous_from_scattered_misses() -> None:
+    """Both genes are exactly 50% saturated; only the structure differs."""
+
+    rows = _library_with(
+        _annotated_rows("blocked", "+", [0.0] * 15 + [50.0] * 15, start=100),
+        _annotated_rows("scattered", "+", [0.0, 50.0] * 15, start=200),
+    )
+
+    calls = _calls_by_gene(rows)
+
+    assert calls["blocked"].saturation == calls["scattered"].saturation == 0.5
+    assert calls["blocked"].gap.max_gap == 15
+    assert calls["scattered"].gap.max_gap == 1
+    assert calls["blocked"].gap.significant
+    assert not calls["scattered"].gap.significant
+
+
+def test_gap_analysis_flags_a_dead_domain_the_saturation_rules_miss() -> None:
+    """A block in the middle clears neither of R's midpoint-half thresholds.
+
+    R splits the gene in half and asks whether one half is >70% empty and the
+    other <30%.  A domain sitting across that split defeats the test, and the
+    gene escapes as Intermediate despite an obvious dead stretch.
+    """
+
+    rows = _library_with(
+        _annotated_rows("mid_domain", "+", [50.0] * 8 + [0.0] * 14 + [50.0] * 8, start=100)
+    )
+
+    call = _calls_by_gene(rows)["mid_domain"]
+
+    assert call.final_call == INTERMEDIATE
+    assert call.gap.max_gap == 14
+    assert call.gap.expected_max_gap < 3
+    assert call.gap.significant
+    assert call.gap.domain_candidate
+
+
+def test_gap_analysis_does_not_flag_genes_already_called_essential() -> None:
+    rows = _library_with(_annotated_rows("dead", "+", [0.0] * 30, start=100))
+
+    call = _calls_by_gene(rows)["dead"]
+
+    assert call.final_call == ESSENTIAL
+    assert call.gap.significant
+    # Significant, but the rules already agree, so there is nothing to review.
+    assert not call.gap.domain_candidate
+
+
+def test_gap_analysis_never_changes_the_essentiality_call() -> None:
+    rows = _library_with(
+        _annotated_rows("mid_domain", "+", [50.0] * 8 + [0.0] * 14 + [50.0] * 8, start=100),
+        _annotated_rows("scattered", "+", [0.0, 50.0] * 15, start=300),
+    )
+
+    with_gaps = {c.gene_id: c.final_call for c in classify_genes(rows).calls}
+    without = {c.gene_id: c.final_call for c in classify_genes(rows, gap_analysis=False).calls}
+
+    assert with_gaps == without
+
+
+def test_gap_analysis_can_be_disabled() -> None:
+    rows = _library_with(_annotated_rows("blocked", "+", [0.0] * 15 + [50.0] * 15, start=100))
+
+    assert all(call.gap is None for call in classify_genes(rows, gap_analysis=False).calls)
+    assert all(call.gap is not None for call in classify_genes(rows).calls)
+
+
+def test_gap_qvalues_are_corrected_across_every_gene_in_the_result() -> None:
+    rows = _library_with(
+        *[
+            _annotated_rows(f"g{i}", "+", [0.0] * 6 + [50.0] * 24, start=100 + 100 * i)
+            for i in range(20)
+        ]
+    )
+
+    result = classify_genes(rows)
+    tested = [call for call in result.calls if call.gene_id != "filler"]
+
+    assert len(tested) == 20
+    # Correction is applied, so every q-value is at least its own p-value.
+    assert all(call.gap.qvalue >= call.gap.pvalue for call in tested)
+    assert all(0.0 <= call.gap.qvalue <= 1.0 for call in tested)
+
+
+def test_gap_analysis_uses_positional_order_not_input_order() -> None:
+    """Shuffling the input must not change what "consecutive" means."""
+
+    gene = _annotated_rows("blocked", "+", [0.0] * 15 + [50.0] * 15, start=100)
+    shuffled = list(reversed(gene[:7])) + gene[20:] + gene[7:20]
+
+    ordered_call = _calls_by_gene(_library_with(gene))["blocked"]
+    shuffled_call = _calls_by_gene(_library_with(shuffled))["blocked"]
+
+    assert ordered_call.gap.max_gap == shuffled_call.gap.max_gap == 15

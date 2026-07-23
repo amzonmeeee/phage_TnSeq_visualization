@@ -28,12 +28,14 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import hashlib
 import importlib.util
 import math
 from pathlib import Path
 from typing import Any, Optional
+
+from . import gaps
 
 
 # Labels emitted by the supplied R implementation.
@@ -50,6 +52,12 @@ ESSENTIAL_BINOMIAL = "Essential (binomial)"
 
 # Significance level for the binomial short-gene supplement.
 BINOMIAL_ALPHA = 0.05
+
+# Significance level for the gap analysis, applied to BH-adjusted p-values.
+GAP_ALPHA = 0.05
+
+# Calls that already say "this gene cannot tolerate insertion".
+_ESSENTIAL_CALLS = frozenset({ESSENTIAL, ESSENTIAL_BINOMIAL})
 
 
 def binomial_min_sites(saturation: float, *, alpha: float = BINOMIAL_ALPHA) -> float | None:
@@ -151,6 +159,33 @@ class GeneSiteRow:
 
 
 @dataclass(frozen=True)
+class GapEvidence:
+    """How surprising this gene's longest run of empty sites is.
+
+    Saturation cannot see contiguity, so this is independent evidence rather
+    than a restatement of the saturation-based call.  See
+    :mod:`phage_tnseq_viz.gaps` for the model.
+
+    ``qvalue`` is the Benjamini-Hochberg adjusted ``pvalue``; ``significant``
+    records ``qvalue < GAP_ALPHA``.
+
+    ``domain_candidate`` marks the disagreement worth looking at by hand: the run
+    of dead sites is significant, yet the built-in rules did not call the gene
+    essential.  A gene where one domain tolerates insertion and another does not
+    produces exactly this pattern, and the saturation-based rules cannot see it
+    because the gene's overall saturation looks ordinary.  It is a prompt to
+    inspect the gene, not a call in its own right.
+    """
+
+    max_gap: int
+    expected_max_gap: float
+    pvalue: float
+    qvalue: float
+    significant: bool
+    domain_candidate: bool
+
+
+@dataclass(frozen=True)
 class GeneClassification:
     """Per-gene statistics and the resulting essentiality label.
 
@@ -166,6 +201,9 @@ class GeneClassification:
     ``binomial_min_sites`` is the site count above which an empty gene on this
     contig is called ``Essential (binomial)``; it is ``None`` when the supplement
     is disabled or the contig's saturation admits no threshold.
+
+    ``gap`` carries the independent run-length evidence, or ``None`` when the
+    gap analysis is disabled.  It never affects ``final_call``.
     """
 
     contig: str
@@ -178,6 +216,7 @@ class GeneClassification:
     final_call: str | None
     read_count_median_threshold: float | None = None
     binomial_min_sites: float | None = None
+    gap: GapEvidence | None = None
 
 
 @dataclass(frozen=True)
@@ -219,6 +258,17 @@ class ConsensusCall:
 
 
 GeneClassifier = Callable[[str, tuple[GeneSiteRow, ...]], Optional[str]]
+
+
+@dataclass(frozen=True)
+class _PendingCall:
+    """One gene's result before gap q-values are known across the whole set."""
+
+    call: GeneClassification
+    called_essential: bool
+    max_gap: int
+    expected_gap: float
+    pvalue: float
 
 
 def annotate_sites_with_genes(
@@ -292,6 +342,7 @@ def classify_genes(
     *,
     classifier: GeneClassifier | None = None,
     binomial_short_genes: bool = True,
+    gap_analysis: bool = True,
 ) -> ClassificationResult:
     """Classify genes using the audited R workflow or a supplied classifier.
 
@@ -307,6 +358,13 @@ def classify_genes(
     it cannot change a call the R rules made; set it to ``False`` to reproduce
     the R script's output exactly.  Saturation is measured per contig, for the
     same reason the read thresholds are.
+
+    ``gap_analysis`` attaches :class:`GapEvidence` to every gene.  It is purely
+    additional evidence and never changes ``final_call``, so it is safe to leave
+    on; the two methods answer different questions and are most useful where
+    they disagree.  Its p-values are corrected together across every gene in the
+    result, contigs included, because the multiple-testing family is the set of
+    tests actually performed rather than a per-genome comparison.
     """
 
     groups = _group_sites(sites)
@@ -328,15 +386,19 @@ def classify_genes(
     # of this supplement derives its library-wide insertion frequency.  Genes are
     # therefore the denominator, not the whole contig; a site shared by two
     # overlapping CDSs counts once per gene, as it does everywhere else here.
-    library_saturation: dict[str, float] = {}
+    library_saturation: dict[str, float] = {
+        contig: (hit_totals.get(contig, 0) / total if total else 0.0)
+        for contig, total in site_totals.items()
+    }
     binomial_thresholds: dict[str, float | None] = {}
     if binomial_short_genes:
-        for contig, total in site_totals.items():
-            saturation = hit_totals.get(contig, 0) / total if total else 0.0
-            library_saturation[contig] = saturation
-            binomial_thresholds[contig] = binomial_min_sites(saturation)
+        binomial_thresholds = {
+            contig: binomial_min_sites(saturation)
+            for contig, saturation in library_saturation.items()
+        }
 
-    calls: list[GeneClassification] = []
+    # Built in two passes: the gap q-values need every p-value in hand.
+    pending: list[_PendingCall] = []
     for (contig, gene_id), rows in groups.items():
         read_threshold = read_thresholds.get(contig)
         strand = rows[0].strand  # R uses unique(gene_data$strand)[1].
@@ -355,6 +417,20 @@ def classify_genes(
         ):
             final_call = ESSENTIAL_BINOMIAL
 
+        # Recorded before any custom classifier runs, so the gap comparison keeps
+        # its meaning when a caller replaces the labels with its own vocabulary.
+        called_essential = final_call in _ESSENTIAL_CALLS
+
+        max_gap = 0
+        pvalue = 1.0
+        expected_gap = 0.0
+        if gap_analysis:
+            saturation_here = library_saturation.get(contig, 0.0)
+            ordered = sorted(rows, key=lambda row: row.position)
+            max_gap = gaps.longest_zero_run(row.read_count for row in ordered)
+            pvalue = gaps.gap_pvalue(total_sites, max_gap, saturation_here)
+            expected_gap = _expected_gap(total_sites, saturation_here)
+
         if classifier is not None:
             try:
                 custom_call = classifier(gene_id, tuple(rows))
@@ -364,20 +440,45 @@ def classify_genes(
                 ) from exc
             final_call = _validate_custom_call(custom_call)
 
-        calls.append(
-            GeneClassification(
-                contig=contig,
-                gene_id=gene_id,
-                strand=strand,
-                total_sites=total_sites,
-                hits=hits,
-                saturation=saturation,
-                initial_call=initial_call,
-                final_call=final_call,
-                read_count_median_threshold=read_threshold,
-                binomial_min_sites=threshold_sites,
+        pending.append(
+            _PendingCall(
+                call=GeneClassification(
+                    contig=contig,
+                    gene_id=gene_id,
+                    strand=strand,
+                    total_sites=total_sites,
+                    hits=hits,
+                    saturation=saturation,
+                    initial_call=initial_call,
+                    final_call=final_call,
+                    read_count_median_threshold=read_threshold,
+                    binomial_min_sites=threshold_sites,
+                ),
+                called_essential=called_essential,
+                max_gap=max_gap,
+                expected_gap=expected_gap,
+                pvalue=pvalue,
             )
         )
+
+    if gap_analysis:
+        qvalues = gaps.benjamini_hochberg([entry.pvalue for entry in pending])
+        calls = [
+            replace(
+                entry.call,
+                gap=GapEvidence(
+                    max_gap=entry.max_gap,
+                    expected_max_gap=entry.expected_gap,
+                    pvalue=entry.pvalue,
+                    qvalue=qvalue,
+                    significant=qvalue < GAP_ALPHA,
+                    domain_candidate=qvalue < GAP_ALPHA and not entry.called_essential,
+                ),
+            )
+            for entry, qvalue in zip(pending, qvalues)
+        ]
+    else:
+        calls = [entry.call for entry in pending]
 
     contigs = {contig for contig, _gene_id in groups}
     single_threshold = read_thresholds.get(next(iter(contigs))) if len(contigs) == 1 else None
@@ -388,6 +489,20 @@ def classify_genes(
         library_saturation=library_saturation,
         binomial_min_sites=binomial_thresholds,
     )
+
+
+def _expected_gap(total_sites: int, saturation: float) -> float:
+    """Expected longest empty run, or 0.0 when the Bernoulli model does not apply.
+
+    A contig where every candidate site was hit, or none was, has no meaningful
+    expected run; both degenerate cases also give a p-value of 1.0, so reporting
+    zero here keeps the two consistent.
+    """
+
+    non_insertion = 1.0 - saturation
+    if total_sites <= 0 or not 0.0 < non_insertion < 1.0:
+        return 0.0
+    return gaps.expected_longest_run(total_sites, non_insertion)
 
 
 def load_classifier(path: str | Path) -> GeneClassifier:
@@ -699,6 +814,7 @@ __all__ = [
     "ESSENTIAL",
     "ESSENTIAL_BINOMIAL",
     "FURTHER_ANALYSIS",
+    "GAP_ALPHA",
     "INTERMEDIATE",
     "NON_ESSENTIAL",
     "REDUCED_FITNESS",
@@ -706,6 +822,7 @@ __all__ = [
     "AnnotatedInsertionSite",
     "ClassificationResult",
     "ConsensusCall",
+    "GapEvidence",
     "GeneAssignment",
     "GeneClassification",
     "GeneClassifier",

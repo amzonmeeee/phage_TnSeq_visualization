@@ -327,6 +327,41 @@ phage-tnseq-viz plot reference.gbk --final-dataset final.csv \
   --no-binomial-short-genes
 ```
 
+### Gap analysis: a second opinion the saturation rules cannot give
+
+Saturation counts *how many* sites in a gene were hit, never *where* they were.
+Two genes with identical saturation therefore score identically, even when one
+has its empty sites scattered evenly and the other has them piled into a single
+unbroken block. The second is the interesting one, because an uninterrupted
+stretch of dead sites is what a domain that cannot tolerate insertion looks
+like.
+
+Every gene is therefore also scored on its **longest run of consecutive empty
+sites**. Under a model where each candidate site is hit independently with the
+library-wide probability, that longest run follows a Gumbel (extreme-value)
+distribution, so the observed run gets a p-value. P-values are corrected across
+all genes with Benjamini-Hochberg, and the gene CSV reports `max_gap`,
+`expected_max_gap`, `gap_pvalue` and `gap_qvalue`.
+
+This is the method of Griffin et al. (2011)<sup>3</sup>, with the refinement
+TRANSIT later adopted: the distribution's location is fixed by matching moments
+against the expected longest run, which is computed *exactly* (via Boyd's
+recurrence) for genes under 20 sites. That exactness is not a nicety here —
+phage genes are mostly that small, and the usual asymptotic formula is poor in
+that range.
+
+**The gap analysis never changes an essentiality call.** It is independent
+evidence, and its value is in the disagreements. When a gene's dead run is
+significant but the rules did *not* call it essential, the `gap_flag` column
+reads `domain-essential?`. That is the multi-domain case the R rules
+structurally cannot catch: they split a gene at its midpoint and ask whether one
+half is >70% empty and the other <30%, so a dead domain lying across that split
+defeats the test and the gene escapes as `Intermediate`. Treat the flag as a
+prompt to look at the gene, not as a call.
+
+Skip the whole analysis with `--no-gap-analysis`; the columns are then left
+blank and every other output is unchanged.
+
 ### Write a custom classifier
 
 Copy [examples/custom_classifier_template.py](examples/custom_classifier_template.py)
@@ -378,6 +413,8 @@ pytest
 
 1. Humolli D, Ransome J, Piel D, Veening JW, Harms A. Systematic mapping of bacteriophage gene essentiality with HIDEN‑SEQ. _bioRxiv (Cold Spring Harbor Laboratory)_. Published online November 20, 2025. doi:10.1101/2025.11.20.689424
 2. Choudhery S, Brown AJ, Akusobi C, Rubin EJ, Sassetti CM, Ioerger TR. Modeling site-specific nucleotide biases affecting Himar1 transposon insertion frequencies in TnSeq data sets. _mSystems_. 2021;6(5):e00876-21. doi:10.1128/mSystems.00876-21
+3. Griffin JE, Gawronski JD, DeJesus MA, Ioerger TR, Akerley BJ, Sassetti CM. High-resolution phenotypic profiling defines genes essential for mycobacterial survival and cholesterol catabolism. _PLoS Pathogens_. 2011;7(9):e1002251. doi:10.1371/journal.ppat.1002251
+4. Schilling MF. The longest run of heads. _College Mathematics Journal_. 1990;21(3):196-207. doi:10.1080/07468342.1990.11973306
 
 ## Citation
 
