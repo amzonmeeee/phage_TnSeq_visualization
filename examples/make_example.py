@@ -79,20 +79,25 @@ def write_final_sites(record: SeqRecord, path: Path) -> None:
                   if sequence[position:position + 2] == "TA"]
     cds = [feature for feature in record.features if feature.type == "CDS"]
 
-    def gene_index(position: int) -> int | None:
-        for index, feature in enumerate(cds):
-            if int(feature.location.start) < position <= int(feature.location.end):
-                return index
-        return None
+    def overlapping_genes(position: int) -> list[int]:
+        # A position can fall inside more than one CDS; return every match so the
+        # generator's model matches the tool's (a site contributes to each
+        # overlapping gene). These synthetic CDSs happen not to overlap, so the
+        # first index is always the only one, but the code no longer bakes that in.
+        return [
+            index
+            for index, feature in enumerate(cds)
+            if int(feature.location.start) < position <= int(feature.location.end)
+        ]
 
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=("contig", "position", "read_count"))
         writer.writeheader()
         for position in candidates:
-            index = gene_index(position)
+            indices = overlapping_genes(position)
             # Cycle CDSs through saturated/non-essential, depleted/essential,
             # and intermediate patterns. Intergenic positions are modestly hit.
-            pattern = index % 3 if index is not None else 2
+            pattern = indices[0] % 3 if indices else 2
             hit_probability = (0.92, 0.08, 0.48)[pattern]
             if rng.random() < hit_probability:
                 read_count = rng.randint(8, 35) if pattern == 0 else rng.randint(1, 16)

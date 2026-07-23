@@ -123,6 +123,12 @@ class PlotOptions:
     show_insertion_sites: bool = True
     show_insertion_density: bool = True
     show_read_histogram: bool = True
+    # Cap the read-histogram scale at this percentile of a contig's positive
+    # counts instead of its single maximum. Real Tn-Seq counts are heavy-tailed,
+    # so one hypersaturated site otherwise squashes every other bar to a sliver.
+    # Bars above the cap are clipped to full height and the scale reads "≥ N".
+    # None keeps the previous max-based scaling.
+    read_histogram_cap_percentile: float | None = None
     show_gc_content: bool = False
     show_gc_skew: bool = False
     show_trna: bool = False
@@ -298,7 +304,21 @@ def render(
             gcs_signal[rec.accession] = (wt, max((abs(v) for v in wt.values), default=1.0) or 1.0)
         positive_counts = [count for count in read_counts.get(rec.accession, {}).values() if count > 0]
         if positive_counts:
-            read_count_max[rec.accession] = max(positive_counts)
+            if options.read_histogram_cap_percentile is not None:
+                # Never let the cap fall below the smallest positive count, or an
+                # all-equal contig would divide by zero / clip everything.
+                read_count_max[rec.accession] = max(
+                    _percentile(positive_counts, options.read_histogram_cap_percentile),
+                    min(positive_counts),
+                )
+            else:
+                read_count_max[rec.accession] = max(positive_counts)
+    # The scale reads "≥ N" only when the cap actually clips at least one site.
+    read_hist_capped = any(
+        count > read_count_max.get(accession, 0.0)
+        for accession, counts in read_counts.items()
+        for count in counts.values()
+    )
 
     # Vertical layout of the gene-arrow axis (data units). The arrow spans
     # [-ARROW_HALF, ARROW_HALF]; a border-clearance pad is kept on each side, and the
@@ -442,7 +462,9 @@ def render(
                 continue
             vmax = read_count_max[accession]
             xs = [track.transform_coord(position) for position, _ in values]
-            tops = [read_hist_base + READ_HIST_AMPLITUDE * (count / vmax) for _, count in values]
+            # min(..., 1.0) clips a count above the percentile cap to full height
+            # so it cannot overshoot into the arrow lane above.
+            tops = [read_hist_base + READ_HIST_AMPLITUDE * min(count / vmax, 1.0) for _, count in values]
             track.ax.vlines(
                 xs, read_hist_base, tops, color=options.read_histogram_color,
                 lw=READ_HIST_LINEWIDTH, zorder=5,
@@ -456,7 +478,7 @@ def render(
                 if scale_track is not None:
                     _draw_read_scale(
                         scale_track.ax, read_hist_base, arrow_y_hi, vmax,
-                        options.read_histogram_color,
+                        options.read_histogram_color, capped=read_hist_capped,
                     )
 
     density_mappable = None
@@ -511,6 +533,21 @@ def render(
     return out_path
 
 
+def _percentile(values: list[float], pct: float) -> float:
+    """Linear-interpolated percentile (``pct`` in [0, 100]) of ``values``."""
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    if len(ordered) == 1:
+        return ordered[0]
+    rank = (max(0.0, min(100.0, pct)) / 100.0) * (len(ordered) - 1)
+    low = math.floor(rank)
+    high = math.ceil(rank)
+    if low == high:
+        return ordered[low]
+    return ordered[low] + (rank - low) * (ordered[high] - ordered[low])
+
+
 def _default_window(length: int) -> int:
     return max(100, length // 100)
 
@@ -521,14 +558,17 @@ def _gc_step(window: int) -> int:
     return max(1, window // 10)
 
 
-def _draw_read_scale(ax, base: float, top: float, vmax: float, color: str) -> None:
+def _draw_read_scale(ax, base: float, top: float, vmax: float, color: str,
+                     *, capped: bool = False) -> None:
     """Draw a small "0 – N reads" vertical scale just right of a histogram row.
 
-    The read bars are drawn normalised (tallest = the contig's peak); this bar tells the
-    reader what that peak is in absolute reads, so the histogram carries a real unit.
-    Placed in blended coords (x in axes fraction, y in data) so it hugs the right spine
-    (an always-clear margin — the left one carries pyGenomeViz's row label) regardless of
-    the genome's bp scale.
+    The read bars are drawn normalised (tallest = the contig's peak, or the
+    percentile cap when one is set); this bar tells the reader what that top is in
+    absolute reads, so the histogram carries a real unit.  When ``capped`` the top
+    label reads ``≥ N`` because taller sites were clipped to full height.  Placed
+    in blended coords (x in axes fraction, y in data) so it hugs the right spine
+    (an always-clear margin — the left one carries pyGenomeViz's row label)
+    regardless of the genome's bp scale.
     """
     trans = ax.get_yaxis_transform()
     x = 1.006
@@ -538,7 +578,8 @@ def _draw_read_scale(ax, base: float, top: float, vmax: float, color: str) -> No
     for y in (base, top):
         ax.plot([x - tick, x + tick], [y, y], transform=trans, color=color, lw=1.3,
                 clip_on=False, zorder=6)
-    label = f"{int(round(vmax)):,}" if vmax >= 1 else f"{vmax:g}"
+    magnitude = f"{int(round(vmax)):,}" if vmax >= 1 else f"{vmax:g}"
+    label = f"≥{magnitude}" if capped else magnitude
     ax.text(x + 2 * tick, top, label, transform=trans, ha="left", va="center",
             fontsize=7.5, color=color, clip_on=False)
     ax.text(x + 2 * tick, base, "0", transform=trans, ha="left", va="center",

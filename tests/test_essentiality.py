@@ -172,6 +172,29 @@ def test_borderline_fitness_adjustments_use_pooled_positive_median() -> None:
     assert calls["protected_essential"].final_call == ESSENTIAL
 
 
+def test_read_threshold_is_computed_per_contig() -> None:
+    # The two fitness refinements are a within-genome comparison, so each contig
+    # must use its own pooled positive-count median.  Contig A (deep) alone lands
+    # on Intermediate at saturation 0.75; pooling a shallow contig B used to drag
+    # the shared median down far enough that A's counts all read as "strong" and
+    # it flipped to Reduced fitness.  With per-contig thresholds A is stable.
+    deep = _annotated_rows("geneA", "+", [1000, 900, 1100, 950, 1050, 1200, 0, 0], contig="A")
+    shallow = _annotated_rows("geneB", "+", [5, 6, 4, 7, 5, 6, 0, 0], contig="B")
+
+    alone = {call.gene_id: call for call in classify_genes(deep).calls}
+    pooled_result = classify_genes(deep + shallow)
+    pooled = {call.gene_id: call for call in pooled_result.calls}
+
+    assert alone["geneA"].final_call == INTERMEDIATE
+    assert pooled["geneA"].final_call == INTERMEDIATE
+    # Each gene reports its own contig's median, unaffected by the other contig.
+    assert pooled["geneA"].read_count_median_threshold == alone["geneA"].read_count_median_threshold
+    assert pooled_result.read_thresholds["A"] != pooled_result.read_thresholds["B"]
+    # The single-value convenience is None once more than one contig is present.
+    assert pooled_result.read_threshold is None
+    assert classify_genes(deep).read_threshold == pooled_result.read_thresholds["A"]
+
+
 def test_consensus_requires_three_votes_and_makes_ties_ambiguous() -> None:
     replicates = [
         [_call("stable", ESSENTIAL), _call("tied", ESSENTIAL), _call("missing", None)],

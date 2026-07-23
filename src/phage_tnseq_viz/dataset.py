@@ -225,8 +225,7 @@ def fill_missing_final_sites(
 def group_counts_for_plotting(sites: Iterable[FinalSite]) -> dict[str, dict[int, float]]:
     """Return the ``accession -> position -> final count`` shape used by render."""
     return {
-        contig: {position: site.read_count for (site_contig, position), site in grouped.items()
-                 if site_contig == contig}
+        contig: {position: site.read_count for (_contig, position), site in grouped.items()}
         for contig, grouped in _group_by_contig(coalesce_final_sites(sites)).items()
     }
 

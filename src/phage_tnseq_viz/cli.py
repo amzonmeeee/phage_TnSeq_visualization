@@ -123,6 +123,7 @@ def build_process_parser() -> argparse.ArgumentParser:
     final.add_argument("--classifier", default=None, help="Trusted local .py custom classifier exposing classify_gene(gene_id, site_rows).")
     final.add_argument("--no-essentiality", action="store_true", help="Write/plot counts but skip gene essentiality calls.")
     final.add_argument("--no-read-histogram", action="store_true", help="Do not draw blue per-site read-count bars.")
+    final.add_argument("--read-histogram-cap", type=float, default=None, metavar="PCT", help="Cap the read-histogram scale at this percentile (e.g. 95) of each contig's positive counts; taller bars clip to full height and the scale reads '≥ N'.")
     final.add_argument("--no-plot", action="store_true", help="Write final CSV(s) but do not render an image.")
     final.add_argument("--plot-output", default="tnseq_map.png", help="Map filename, relative to --output-dir unless absolute.")
     final.add_argument("--show-candidate-sites", action="store_true", help="Also draw potential TA insertion ticks on the processed-data map.")
@@ -152,6 +153,7 @@ def _add_plot_arguments(p: argparse.ArgumentParser) -> None:
     g_data.add_argument("--classifier", default=None, help="Trusted local .py custom classifier exposing classify_gene(gene_id, site_rows).")
     g_data.add_argument("--no-essentiality", action="store_true", help="Do not call/colour gene essentiality.")
     g_data.add_argument("--no-read-histogram", action="store_true", help="Do not draw the blue per-site count histogram.")
+    g_data.add_argument("--read-histogram-cap", type=float, default=None, metavar="PCT", help="Cap the read-histogram scale at this percentile (e.g. 95) of each contig's positive counts, so one hypersaturated site does not squash the rest; taller bars clip to full height and the scale reads '≥ N'.")
     g_data.add_argument("--csv-dir", default=None, help="Directory for normalised final-site and gene-call CSV outputs.")
     g_data.add_argument("--contig-alias", action="append", default=[], metavar="INPUT=GENBANK", help="Map an input CSV/WIG contig ID to the GenBank accession (repeatable).")
 
@@ -324,6 +326,7 @@ def _run_process(args: argparse.Namespace) -> int:
         show_insertion_sites=bool(insertion_sites),
         show_insertion_density=False,
         show_read_histogram=not args.no_read_histogram,
+        read_histogram_cap_percentile=_resolve_read_histogram_cap(args.read_histogram_cap),
     )
     out = _render_final_dataset(
         records, insertion_sites, options, plot_output, transposon, sites, classification
@@ -388,6 +391,7 @@ def _plot_options(args: argparse.Namespace, sites_available: bool) -> PlotOption
         show_insertion_sites=sites_available and not args.no_insertion_sites,
         show_insertion_density=sites_available and not args.no_insertion_density,
         show_read_histogram=not args.no_read_histogram,
+        read_histogram_cap_percentile=_resolve_read_histogram_cap(args.read_histogram_cap),
         show_gc_content=args.gc_content,
         show_gc_skew=args.gc_skew,
         show_trna=args.trna,
@@ -397,6 +401,14 @@ def _plot_options(args: argparse.Namespace, sites_available: bool) -> PlotOption
         show_read_legend=not args.no_read_legend,
         big_title=not args.small_title,
     )
+
+
+def _resolve_read_histogram_cap(pct: float | None) -> float | None:
+    if pct is None:
+        return None
+    if not 0 < pct <= 100:
+        raise ValueError("--read-histogram-cap must be a percentile in (0, 100]")
+    return pct
 
 
 def _resolve_transposon_or_raise(spec: str) -> Transposon:
@@ -512,8 +524,8 @@ def _write_analysis_csvs(
 
         writer = csv.DictWriter(handle, fieldnames=fields)
         writer.writeheader()
-        threshold = "" if classification.read_threshold is None else f"{classification.read_threshold:g}"
         for call in classification.calls:
+            threshold = call.read_count_median_threshold
             writer.writerow(
                 {
                     "contig": call.contig,
@@ -524,7 +536,7 @@ def _write_analysis_csvs(
                     "saturation": f"{call.saturation:g}",
                     "initial_call": call.initial_call or "",
                     "final_call": call.final_call or "",
-                    "read_count_median_threshold": threshold,
+                    "read_count_median_threshold": "" if threshold is None else f"{threshold:g}",
                 }
             )
     return site_path, gene_path

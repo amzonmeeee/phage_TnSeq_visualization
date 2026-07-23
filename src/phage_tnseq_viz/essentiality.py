@@ -28,7 +28,7 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import hashlib
 import importlib.util
 import math
@@ -119,6 +119,10 @@ class GeneClassification:
     R refinement/fitness-adjusted result, or a custom result when a custom
     classifier is supplied.  ``None`` faithfully represents R's ``NA`` for a
     gene with five or fewer candidate sites.
+
+    ``read_count_median_threshold`` is the pooled positive-count median of *this
+    gene's contig* used by the two fitness refinements; it is ``None`` when the
+    contig had no positive sites.
     """
 
     contig: str
@@ -129,14 +133,24 @@ class GeneClassification:
     saturation: float
     initial_call: str | None
     final_call: str | None
+    read_count_median_threshold: float | None = None
 
 
 @dataclass(frozen=True)
 class ClassificationResult:
-    """The calls plus the pooled positive-count median used by the R method."""
+    """The calls plus the positive-count median(s) used by the R method.
+
+    ``read_thresholds`` maps each contig to its own pooled positive-count median.
+    Thresholds are kept per contig because the fitness refinements are a
+    within-genome comparison, and phage genome sequencing depths are not
+    comparable across contigs.  ``read_threshold`` is retained as a convenience
+    for the common single-contig dataset (the sole contig's threshold), and is
+    ``None`` whenever more than one contig is present.
+    """
 
     calls: tuple[GeneClassification, ...]
     read_threshold: float | None
+    read_thresholds: dict[str, float | None] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -227,23 +241,28 @@ def classify_genes(
 ) -> ClassificationResult:
     """Classify genes using the audited R workflow or a supplied classifier.
 
-    The pooled read threshold is the R default ``quantile(positive_counts,
-    0.50)`` after sites are flattened across overlapping genes.  When
-    ``classifier`` is provided, R statistics and ``initial_call`` are still
+    The read threshold is the R default ``quantile(positive_counts, 0.50)`` after
+    sites are flattened across overlapping genes, computed *per contig*: the R
+    script assumes a single genome, and pooling a shallow contig's counts with a
+    deeper one's would shift the shared median and silently flip fitness calls.
+    When ``classifier`` is provided, R statistics and ``initial_call`` are still
     calculated, but its return value replaces every ``final_call``.
     """
 
     groups = _group_sites(sites)
-    positive_counts = [
-        row.read_count
-        for rows in groups.values()
-        for row in rows
-        if row.read_count > 0
-    ]
-    read_threshold = _r_quantile(positive_counts, 0.50)
+    positive_by_contig: dict[str, list[float]] = {}
+    for (contig, _gene_id), rows in groups.items():
+        for row in rows:
+            if row.read_count > 0:
+                positive_by_contig.setdefault(contig, []).append(row.read_count)
+    read_thresholds: dict[str, float | None] = {
+        contig: _r_quantile(counts, 0.50)
+        for contig, counts in positive_by_contig.items()
+    }
 
     calls: list[GeneClassification] = []
     for (contig, gene_id), rows in groups.items():
+        read_threshold = read_thresholds.get(contig)
         strand = rows[0].strand  # R uses unique(gene_data$strand)[1].
         total_sites = len(rows)
         hits = sum(row.read_count > 0 for row in rows)
@@ -269,10 +288,17 @@ def classify_genes(
                 saturation=saturation,
                 initial_call=initial_call,
                 final_call=final_call,
+                read_count_median_threshold=read_threshold,
             )
         )
 
-    return ClassificationResult(calls=tuple(calls), read_threshold=read_threshold)
+    contigs = {contig for contig, _gene_id in groups}
+    single_threshold = read_thresholds.get(next(iter(contigs))) if len(contigs) == 1 else None
+    return ClassificationResult(
+        calls=tuple(calls),
+        read_threshold=single_threshold,
+        read_thresholds=read_thresholds,
+    )
 
 
 def load_classifier(path: str | Path) -> GeneClassifier:
