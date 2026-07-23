@@ -178,6 +178,7 @@ def build_process_parser() -> argparse.ArgumentParser:
     final.add_argument("--classifier", default=None, help="Trusted local .py custom classifier exposing classify_gene(gene_id, site_rows).")
     final.add_argument("--no-essentiality", action="store_true", help="Write/plot counts but skip gene essentiality calls.")
     final.add_argument("--no-gap-analysis", action="store_true", help="Skip the gap analysis, so no longest-empty-run statistics or domain-essential flags are reported.")
+    final.add_argument("--no-confidence", action="store_true", help="Skip confidence scoring, so no per-gene agreement between call and count is reported.")
     final.add_argument("--no-binomial-short-genes", action="store_true", help="Disable the binomial supplement, so genes with too few candidate sites for the R rules stay uncalled instead of being tested for zero insertions.")
     final.add_argument("--no-read-histogram", action="store_true", help="Do not draw blue per-site read-count bars.")
     final.add_argument("--read-histogram-cap", type=float, default=None, metavar="PCT", help="Cap the read-histogram scale at this percentile (e.g. 95) of each contig's positive counts; taller bars clip to full height and the scale reads '≥ N'.")
@@ -219,6 +220,7 @@ def _add_plot_arguments(p: argparse.ArgumentParser) -> None:
     g_data.add_argument("--classifier", default=None, help="Trusted local .py custom classifier exposing classify_gene(gene_id, site_rows).")
     g_data.add_argument("--no-essentiality", action="store_true", help="Do not call/colour gene essentiality.")
     g_data.add_argument("--no-gap-analysis", action="store_true", help="Skip the gap analysis, so no longest-empty-run statistics or domain-essential flags are reported.")
+    g_data.add_argument("--no-confidence", action="store_true", help="Skip confidence scoring, so no per-gene agreement between call and count is reported.")
     g_data.add_argument("--no-binomial-short-genes", action="store_true", help="Disable the binomial supplement, so genes with too few candidate sites for the R rules stay uncalled instead of being tested for zero insertions.")
     g_data.add_argument("--no-read-histogram", action="store_true", help="Do not draw the blue per-site count histogram.")
     g_data.add_argument("--read-histogram-cap", type=float, default=None, metavar="PCT", help="Cap the read-histogram scale at this percentile (e.g. 95) of each contig's positive counts, so one hypersaturated site does not squash the rest; taller bars clip to full height and the scale reads '≥ N'.")
@@ -302,6 +304,7 @@ def _run_plot(args: argparse.Namespace) -> int:
         skip_essentiality=args.no_essentiality,
         binomial_short_genes=not args.no_binomial_short_genes,
         gap_analysis=not args.no_gap_analysis,
+        confidence_scoring=not args.no_confidence,
     )
     csv_dir = Path(args.csv_dir) if args.csv_dir else (output.parent if output.parent != Path("") else Path("."))
     site_csv, gene_csv, qc_csv = _write_analysis_csvs(
@@ -384,6 +387,7 @@ def _run_process(args: argparse.Namespace) -> int:
         skip_essentiality=args.no_essentiality,
         binomial_short_genes=not args.no_binomial_short_genes,
         gap_analysis=not args.no_gap_analysis,
+        confidence_scoring=not args.no_confidence,
     )
     site_csv, gene_csv, qc_csv = _write_analysis_csvs(
         sites, annotations, classification, output_dir, stem="final", qc_sites=raw_sites
@@ -557,6 +561,7 @@ def _annotate_and_classify(
     skip_essentiality: bool,
     binomial_short_genes: bool = True,
     gap_analysis: bool = True,
+    confidence_scoring: bool = True,
 ) -> tuple[list[AnnotatedInsertionSite], ClassificationResult | None]:
     records = list(records)
     sites = list(sites)
@@ -587,6 +592,7 @@ def _annotate_and_classify(
         classifier=classifier,
         binomial_short_genes=binomial_short_genes,
         gap_analysis=gap_analysis,
+        confidence_scoring=confidence_scoring,
     )
 
 
@@ -675,6 +681,34 @@ def _gap_columns(gap: GapEvidence | None) -> dict[str, str]:
     }
 
 
+def _confidence_columns(score) -> dict[str, str]:
+    """Render confidence as CSV cells, blank when it was not scored."""
+    if score is None:
+        return {"confidence": "", "confidence_flag": ""}
+    return {
+        "confidence": f"{score.confidence:.3f}",
+        "confidence_flag": score.flag,  # "", "ambiguous", or "low-confidence"
+    }
+
+
+def _log_confidence_summary(classification: ClassificationResult) -> None:
+    """Warn about calls the confidence score flags as inconsistent with the count."""
+    low = [c for c in classification.calls if c.confidence and c.confidence.flag == "low-confidence"]
+    ambiguous = [c for c in classification.calls if c.confidence and c.confidence.flag == "ambiguous"]
+    if not low and not ambiguous:
+        return
+    logger.info(
+        "      confidence: %d low-confidence, %d ambiguous of %d called genes",
+        len(low), len(ambiguous),
+        sum(1 for c in classification.calls if c.confidence is not None),
+    )
+    for call in low:
+        logger.warning(
+            "gene %s:%s called %r but its mean count %.1f fits another call better (confidence %.2f)",
+            call.contig, call.gene_id, call.final_call, call.mean_count, call.confidence.confidence,
+        )
+
+
 def _write_analysis_csvs(
     sites: Iterable[FinalSite],
     annotations: Iterable[AnnotatedInsertionSite],
@@ -699,9 +733,10 @@ def _write_analysis_csvs(
     with gene_path.open("w", encoding="utf-8", newline="") as handle:
         fields = [
             "contig", "gene_id", "strand", "total_candidate_sites", "hit_sites",
-            "saturation", "initial_call", "final_call", "read_count_median_threshold",
-            "binomial_min_sites",
+            "saturation", "mean_count", "initial_call", "final_call",
+            "read_count_median_threshold", "binomial_min_sites",
             "max_gap", "expected_max_gap", "gap_pvalue", "gap_qvalue", "gap_flag",
+            "confidence", "confidence_flag",
         ]
         import csv
 
@@ -718,13 +753,16 @@ def _write_analysis_csvs(
                     "total_candidate_sites": call.total_sites,
                     "hit_sites": call.hits,
                     "saturation": f"{call.saturation:g}",
+                    "mean_count": f"{call.mean_count:.1f}",
                     "initial_call": call.initial_call or "",
                     "final_call": call.final_call or "",
                     "read_count_median_threshold": "" if threshold is None else f"{threshold:g}",
                     "binomial_min_sites": "" if min_sites is None else f"{min_sites:.2f}",
                     **_gap_columns(call.gap),
+                    **_confidence_columns(call.confidence),
                 }
             )
+    _log_confidence_summary(classification)
     return site_path, gene_path, qc_path
 
 

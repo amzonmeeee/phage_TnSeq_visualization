@@ -445,6 +445,41 @@ prompt to look at the gene, not as a call.
 Skip the whole analysis with `--no-gap-analysis`; the columns are then left
 blank and every other output is unchanged.
 
+### Confidence: does the call agree with the gene's read level?
+
+A call is made from *where* the insertions fall; a gene's overall insertion
+*level* is a second, independent check on it. Essential genes have counts near
+zero, non-essential genes have high counts, and the fitness categories fall in
+between. When a gene's call disagrees with its own count — an `Essential` gene
+that is actually full of reads, or a `Non-essential` gene with almost none — the
+call is worth a second look.
+
+Each called gene therefore gets a **confidence** in `[0, 1]`. For every label
+that was assigned, a robust Normal distribution (median for centre, an
+IQR-derived spread) is fitted to the mean counts of the genes carrying it; a
+gene's confidence is the normalized probability of its own label given its mean
+count. The gene CSV reports `mean_count`, `confidence`, and a `confidence_flag`:
+
+- **empty** — the label is the most probable explanation of the count (fine).
+- **`ambiguous`** — the label is plausible (probability ≥ 0.2) but another label
+  fits the count better.
+- **`low-confidence`** — probability below 0.2; the count points elsewhere and
+  the call should be treated with suspicion. These are also logged as warnings.
+
+This is TRANSIT's HMM confidence score, lifted off the HMM: it is a
+post-processing step over labelled genes and their counts, so it applies to the
+rule-based calls or a custom classifier's labels alike. **It never changes a
+call** — like the gap analysis, it is independent evidence, most useful where it
+disagrees. Confidence is fitted per contig, and is skipped (blank) for a contig
+with fewer than two distinct calls, since there is then nothing to compare
+against. Disable it with `--no-confidence`.
+
+One caveat specific to phage: TRANSIT designed this for genomes with thousands of
+genes, where each label's distribution is well estimated. A small phage offers
+tens of genes per label, so treat the flag as a prompt, not a verdict — its
+robust median/IQR fit and a floor on the spread keep it stable on small groups,
+but it is still an estimate from few points.
+
 ### Write a custom classifier
 
 Copy [examples/custom_classifier_template.py](examples/custom_classifier_template.py)

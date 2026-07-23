@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from . import gaps
+from .confidence import ConfidenceScore, score_calls
 
 
 # Labels emitted by the supplied R implementation.
@@ -204,6 +205,14 @@ class GeneClassification:
 
     ``gap`` carries the independent run-length evidence, or ``None`` when the
     gap analysis is disabled.  It never affects ``final_call``.
+
+    ``mean_count`` is the gene's mean read count over all its candidate sites,
+    zeros included; it is the statistic the confidence score is built on.
+
+    ``confidence`` scores how well ``mean_count`` agrees with ``final_call``, or
+    is ``None`` when confidence scoring is disabled, the gene has no call, or the
+    contig has too few distinct calls to compare.  It never affects
+    ``final_call``.
     """
 
     contig: str
@@ -217,6 +226,8 @@ class GeneClassification:
     read_count_median_threshold: float | None = None
     binomial_min_sites: float | None = None
     gap: GapEvidence | None = None
+    mean_count: float = 0.0
+    confidence: ConfidenceScore | None = None
 
 
 @dataclass(frozen=True)
@@ -262,13 +273,18 @@ GeneClassifier = Callable[[str, tuple[GeneSiteRow, ...]], Optional[str]]
 
 @dataclass(frozen=True)
 class _PendingCall:
-    """One gene's result before gap q-values are known across the whole set."""
+    """One gene's result before gap q-values and confidence are computed.
+
+    Both need every gene in hand first: gap q-values are corrected across the
+    whole set, and confidence fits a distribution per label.
+    """
 
     call: GeneClassification
     called_essential: bool
     max_gap: int
     expected_gap: float
     pvalue: float
+    mean_count: float
 
 
 def annotate_sites_with_genes(
@@ -343,6 +359,7 @@ def classify_genes(
     classifier: GeneClassifier | None = None,
     binomial_short_genes: bool = True,
     gap_analysis: bool = True,
+    confidence_scoring: bool = True,
 ) -> ClassificationResult:
     """Classify genes using the audited R workflow or a supplied classifier.
 
@@ -405,6 +422,7 @@ def classify_genes(
         total_sites = len(rows)
         hits = sum(row.read_count > 0 for row in rows)
         saturation = hits / total_sites
+        mean_count = sum(row.read_count for row in rows) / total_sites
         initial_call, final_call = _r_classify_gene(rows, read_threshold)
 
         threshold_sites = binomial_thresholds.get(contig)
@@ -453,11 +471,13 @@ def classify_genes(
                     final_call=final_call,
                     read_count_median_threshold=read_threshold,
                     binomial_min_sites=threshold_sites,
+                    mean_count=mean_count,
                 ),
                 called_essential=called_essential,
                 max_gap=max_gap,
                 expected_gap=expected_gap,
                 pvalue=pvalue,
+                mean_count=mean_count,
             )
         )
 
@@ -480,6 +500,9 @@ def classify_genes(
     else:
         calls = [entry.call for entry in pending]
 
+    if confidence_scoring:
+        calls = _attach_confidence(calls)
+
     contigs = {contig for contig, _gene_id in groups}
     single_threshold = read_thresholds.get(next(iter(contigs))) if len(contigs) == 1 else None
     return ClassificationResult(
@@ -489,6 +512,30 @@ def classify_genes(
         library_saturation=library_saturation,
         binomial_min_sites=binomial_thresholds,
     )
+
+
+def _attach_confidence(calls: Sequence[GeneClassification]) -> list[GeneClassification]:
+    """Score each called gene's agreement with its label, one contig at a time.
+
+    Confidence is fitted per contig for the same reason the read thresholds are:
+    gene mean counts scale with a contig's sequencing depth, so pooling contigs
+    would compare genes against a distribution on the wrong scale.  Genes without
+    a call, and contigs with fewer than two distinct calls, receive no score.
+    """
+
+    by_contig: dict[str, list[int]] = {}
+    for index, call in enumerate(calls):
+        if call.final_call is not None:
+            by_contig.setdefault(call.contig, []).append(index)
+
+    result = list(calls)
+    for indices in by_contig.values():
+        scores = score_calls([(calls[i].final_call, calls[i].mean_count) for i in indices])
+        if scores is None:
+            continue
+        for index, score in zip(indices, scores):
+            result[index] = replace(result[index], confidence=score)
+    return result
 
 
 def _expected_gap(total_sites: int, saturation: float) -> float:
@@ -822,6 +869,7 @@ __all__ = [
     "AnnotatedInsertionSite",
     "ClassificationResult",
     "ConsensusCall",
+    "ConfidenceScore",
     "GapEvidence",
     "GeneAssignment",
     "GeneClassification",

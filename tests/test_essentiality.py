@@ -452,3 +452,106 @@ def test_gap_analysis_uses_positional_order_not_input_order() -> None:
     shuffled_call = _calls_by_gene(_library_with(shuffled))["blocked"]
 
     assert ordered_call.gap.max_gap == shuffled_call.gap.max_gap == 15
+
+
+def test_confidence_is_attached_and_agrees_with_a_clean_dataset() -> None:
+    """Essential genes near zero, non-essential genes high: all confident."""
+
+    rows = (
+        _annotated_rows("ess1", "+", [0.0] * 30, start=1)
+        + _annotated_rows("ess2", "+", [0.0] * 30, start=100)
+        + _annotated_rows("ne1", "+", [150.0] * 30, start=200)
+        + _annotated_rows("ne2", "+", [180.0] * 30, start=300)
+    )
+
+    calls = _calls_by_gene(rows)
+
+    assert all(call.confidence is not None for call in calls.values())
+    assert all(call.confidence.flag == "" for call in calls.values())
+    assert calls["ess1"].mean_count == 0.0
+    assert calls["ne1"].mean_count == pytest.approx(150.0)
+
+
+def test_confidence_flags_a_call_inconsistent_with_its_count() -> None:
+    """A gene called Essential by the rules but full of reads is low-confidence.
+
+    A 3'-biased insertion pattern makes the R rules call this Essential, yet its
+    mean count sits with the non-essential genes -- exactly the inconsistency the
+    confidence score exists to surface.
+    """
+
+    # Most genes are cleanly essential (empty) or non-essential (high, saturated).
+    rows = (
+        _annotated_rows("ess1", "+", [0.0] * 30, start=1)
+        + _annotated_rows("ess2", "+", [0.0] * 30, start=100)
+        + _annotated_rows("ne1", "+", [200.0] * 30, start=200)
+        + _annotated_rows("ne2", "+", [200.0] * 30, start=300)
+        + _annotated_rows("ne3", "+", [200.0] * 30, start=400)
+        # 3'-biased: hits cluster at the high-coordinate end, so R calls it
+        # Essential, but the gene is actually full of reads.
+        + _annotated_rows("suspect", "+", [0.0] * 6 + [500.0] * 4, start=500)
+    )
+
+    calls = _calls_by_gene(rows)
+    suspect = calls["suspect"]
+
+    assert suspect.final_call == ESSENTIAL  # the rules call it essential
+    assert suspect.mean_count > 100  # but it is full of reads
+    assert suspect.confidence.flag == "low-confidence"
+    assert suspect.confidence.confidence < 0.2
+
+
+def test_confidence_never_changes_the_call() -> None:
+    rows = (
+        _annotated_rows("ess", "+", [0.0] * 30, start=1)
+        + _annotated_rows("ne", "+", [200.0] * 30, start=100)
+        + _annotated_rows("suspect", "+", [0.0] * 6 + [500.0] * 4, start=200)
+    )
+
+    with_conf = {c.gene_id: c.final_call for c in classify_genes(rows).calls}
+    without = {c.gene_id: c.final_call for c in classify_genes(rows, confidence_scoring=False).calls}
+
+    assert with_conf == without
+
+
+def test_confidence_can_be_disabled() -> None:
+    rows = (
+        _annotated_rows("ess", "+", [0.0] * 30, start=1)
+        + _annotated_rows("ne", "+", [200.0] * 30, start=100)
+    )
+
+    assert all(c.confidence is None for c in classify_genes(rows, confidence_scoring=False).calls)
+    assert all(c.confidence is not None for c in classify_genes(rows).calls)
+
+
+def test_confidence_is_none_when_only_one_call_label_is_present() -> None:
+    """With nothing to compare against, confidence would be trivially 1.0."""
+
+    rows = (
+        _annotated_rows("ess1", "+", [0.0] * 30, start=1)
+        + _annotated_rows("ess2", "+", [0.0] * 30, start=100)
+    )
+
+    calls = classify_genes(rows).calls
+    assert {c.final_call for c in calls} == {ESSENTIAL}
+    assert all(c.confidence is None for c in calls)
+
+
+def test_confidence_is_scored_per_contig() -> None:
+    """Each contig is fitted on its own scale, so a deep contig cannot distort a
+    shallow one's confidence."""
+
+    rows = (
+        _annotated_rows("A_ess", "+", [0.0] * 30, start=1, contig="A")
+        + _annotated_rows("A_ne", "+", [100.0] * 30, start=100, contig="A")
+        + _annotated_rows("B_ess", "+", [0.0] * 30, start=1, contig="B")
+        + _annotated_rows("B_ne", "+", [5000.0] * 30, start=100, contig="B")
+    )
+
+    calls = {(c.contig, c.gene_id): c for c in classify_genes(rows).calls}
+
+    # Both contigs resolve cleanly despite very different depths.
+    assert calls[("A", "A_ne")].confidence.flag == ""
+    assert calls[("B", "B_ne")].confidence.flag == ""
+    assert calls[("A", "A_ne")].mean_count == pytest.approx(100.0)
+    assert calls[("B", "B_ne")].mean_count == pytest.approx(5000.0)
