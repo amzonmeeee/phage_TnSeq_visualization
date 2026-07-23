@@ -11,7 +11,7 @@ explicit paths extend it for sequencing data:
 from __future__ import annotations
 
 import argparse
-from dataclasses import asdict, replace
+from dataclasses import asdict, dataclass, replace
 import json
 import logging
 from pathlib import Path
@@ -29,6 +29,8 @@ from .dataset import (
     group_counts_for_plotting,
     load_final_dataset,
     write_final_dataset,
+    write_prot_table,
+    write_wig,
 )
 from .essentiality import (
     AnnotatedInsertionSite,
@@ -173,7 +175,7 @@ def build_process_parser() -> argparse.ArgumentParser:
     subsampling.add_argument("--observed-sites-only", action="store_true", help="Do not add zero-count candidate sites (not recommended for essentiality).")
 
     final = p.add_argument_group("final data and map")
-    final.add_argument("--normalize", choices=("none", "ttr"), default="none", help="Rescale counts so libraries are comparable without discarding reads. 'ttr' is TRANSIT's Trimmed Total Reads; QC still reports raw counts.")
+    final.add_argument("--normalize", choices=("auto", "none", "ttr"), default="auto", help="When to TTR-normalize so libraries are comparable (never discards reads; QC always reports raw counts). 'auto' (default): normalize here when you supply counts directly (plot), but defer to TPP/TRANSIT when this tool ran TPP (process) — the exported .wig stays raw for TRANSIT to normalize. 'none'/'ttr' force it off/on.")
     final.add_argument("--norm-target", type=float, default=100.0, help="Target typical non-zero count that TTR normalization scales each contig to.")
     final.add_argument("--classifier", default=None, help="Trusted local .py custom classifier exposing classify_gene(gene_id, site_rows).")
     final.add_argument("--no-essentiality", action="store_true", help="Write/plot counts but skip gene essentiality calls.")
@@ -213,8 +215,8 @@ def _add_plot_arguments(p: argparse.ArgumentParser) -> None:
     g_tn.add_argument("--single-strand", action="store_true", help="Scan a custom motif on the forward strand only.")
 
     g_data = p.add_argument_group("processed final dataset")
-    g_data.add_argument("--final-dataset", default=None, help="CSV final-site table; bypasses all built-in raw-read processing.")
-    g_data.add_argument("--normalize", choices=("none", "ttr"), default="none", help="Rescale counts so libraries are comparable without discarding reads. 'ttr' is TRANSIT's Trimmed Total Reads; QC still reports raw counts.")
+    g_data.add_argument("--final-dataset", default=None, help="Final-site count table (CSV, or a TRANSIT/TPP .wig/.wig.gz); bypasses all built-in raw-read processing.")
+    g_data.add_argument("--normalize", choices=("auto", "none", "ttr"), default="auto", help="When to TTR-normalize so libraries are comparable (never discards reads; QC always reports raw counts). 'auto' (default): normalize here when you supply counts directly (plot), but defer to TPP/TRANSIT when this tool ran TPP (process) — the exported .wig stays raw for TRANSIT to normalize. 'none'/'ttr' force it off/on.")
     g_data.add_argument("--norm-target", type=float, default=100.0, help="Target typical non-zero count that TTR normalization scales each contig to.")
     g_data.add_argument("--candidate-model", choices=("auto", "motif", "all-bases", "observed"), default="auto", help="How omitted zero-count candidate sites are completed before classification.")
     g_data.add_argument("--classifier", default=None, help="Trusted local .py custom classifier exposing classify_gene(gene_id, site_rows).")
@@ -284,7 +286,7 @@ def _run_plot(args: argparse.Namespace) -> int:
         return 0
 
     default_contig = records[0].accession if len(records) == 1 else None
-    sites = load_final_dataset(args.final_dataset, default_contig=default_contig)
+    sites = _load_final_sites(args.final_dataset, default_contig=default_contig)
     sites = _apply_contig_aliases(sites, _parse_contig_aliases(args.contig_alias))
     candidate_model = _resolve_candidate_model(args.candidate_model, transposon)
     if candidate_model != "observed":
@@ -296,7 +298,7 @@ def _run_plot(args: argparse.Namespace) -> int:
         )
 
     raw_sites = sites
-    sites = _normalize_sites(sites, args.normalize, args.norm_target)
+    sites = _normalize_sites(sites, _resolve_normalize(args.normalize, from_tpp=False), args.norm_target)
     annotations, result = _annotate_and_classify(
         records,
         sites,
@@ -307,16 +309,18 @@ def _run_plot(args: argparse.Namespace) -> int:
         confidence_scoring=not args.no_confidence,
     )
     csv_dir = Path(args.csv_dir) if args.csv_dir else (output.parent if output.parent != Path("") else Path("."))
-    site_csv, gene_csv, qc_csv = _write_analysis_csvs(
-        sites, annotations, result, csv_dir, stem=output.stem, qc_sites=raw_sites
+    outputs = _write_analysis_csvs(
+        sites, annotations, result, csv_dir, stem=output.stem, records=records, qc_sites=raw_sites
     )
     out = _render_final_dataset(
         records, insertion_sites, options, output, transposon, sites, result
     )
-    logger.info("Done. Wrote %s\n      • %s", out, site_csv)
-    if gene_csv:
-        logger.info("      • %s", gene_csv)
-    logger.info("      • %s", qc_csv)
+    logger.info("Done. Wrote %s\n      • %s", out, outputs.site)
+    if outputs.gene:
+        logger.info("      • %s", outputs.gene)
+    logger.info("      • %s", outputs.qc)
+    logger.info("      • %s (raw counts for TRANSIT)", outputs.wig)
+    logger.info("      • %s (annotation for TRANSIT)", outputs.prot_table)
     return 0
 
 
@@ -379,7 +383,7 @@ def _run_process(args: argparse.Namespace) -> int:
     logger.info("[2/3] Annotating final insertion sites and calling essentiality ...")
     records = _load_records(reference, None, False)
     raw_sites = final_sites_from_counts(counts)
-    sites = _normalize_sites(raw_sites, args.normalize, args.norm_target)
+    sites = _normalize_sites(raw_sites, _resolve_normalize(args.normalize, from_tpp=True), args.norm_target)
     annotations, classification = _annotate_and_classify(
         records,
         sites,
@@ -389,13 +393,15 @@ def _run_process(args: argparse.Namespace) -> int:
         gap_analysis=not args.no_gap_analysis,
         confidence_scoring=not args.no_confidence,
     )
-    site_csv, gene_csv, qc_csv = _write_analysis_csvs(
-        sites, annotations, classification, output_dir, stem="final", qc_sites=raw_sites
+    outputs = _write_analysis_csvs(
+        sites, annotations, classification, output_dir, stem="final", records=records, qc_sites=raw_sites
     )
-    logger.info("      • final site table: %s", site_csv)
-    if gene_csv:
-        logger.info("      • gene calls: %s", gene_csv)
-    logger.info("      • library QC: %s", qc_csv)
+    logger.info("      • final site table: %s", outputs.site)
+    if outputs.gene:
+        logger.info("      • gene calls: %s", outputs.gene)
+    logger.info("      • library QC: %s", outputs.qc)
+    logger.info("      • TRANSIT WIG (raw counts): %s", outputs.wig)
+    logger.info("      • TRANSIT prot_table: %s", outputs.prot_table)
 
     if args.no_plot:
         return 0
@@ -596,6 +602,55 @@ def _annotate_and_classify(
     )
 
 
+def _load_final_sites(path: str, *, default_contig: str | None) -> list[FinalSite]:
+    """Load a final-site table from a CSV or a TRANSIT/TPP ``.wig`` file.
+
+    A ``.wig`` (optionally ``.wig.gz``) is read as raw per-site counts via the
+    same parser used for TPP output; its ``chrom=`` names are trusted here,
+    because a user-supplied wig carries the contig names they intend (use
+    ``--contig-alias`` to remap). Anything else is read as the canonical CSV.
+    """
+    lowered = path.lower()
+    if lowered.endswith(".wig") or lowered.endswith(".wig.gz"):
+        from .pipeline import parse_tpp_wig
+
+        counts = parse_tpp_wig(path, default_contig=default_contig)
+        if not counts:
+            raise DatasetError(f"no insertion counts found in WIG file: {path}")
+        return final_sites_from_counts(counts)
+    return load_final_dataset(path, default_contig=default_contig)
+
+
+def _resolve_normalize(choice: str, *, from_tpp: bool) -> str:
+    """Resolve ``--normalize auto`` so the workflow normalizes exactly once.
+
+    The principle: prefer the TPP/TRANSIT toolchain's own normalization when the
+    counts pass through it, and normalize here only when they do not.
+
+    * ``from_tpp`` (the ``process`` path): the counts came from TPP and the raw
+      WIG is exported for TRANSIT, which applies its own TTR on import.  So
+      ``auto`` defers -- it does not normalize here, to avoid normalizing twice.
+    * not ``from_tpp`` (the ``plot`` path): the user supplied final counts that
+      never went through TPP/TRANSIT, so ``auto`` normalizes here with TTR, so
+      the workflow still normalizes once.
+
+    An explicit ``none``/``ttr`` always wins over ``auto``.
+    """
+    if choice != "auto":
+        return choice
+    if from_tpp:
+        logger.info(
+            "      normalize=auto: counts came from TPP, deferring normalization to "
+            "TPP/TRANSIT (the exported .wig is raw for TRANSIT to normalize)"
+        )
+        return "none"
+    logger.info(
+        "      normalize=auto: normalizing here with TTR (counts supplied directly, "
+        "not via TPP/TRANSIT); pass --normalize none to keep raw counts"
+    )
+    return "ttr"
+
+
 def _normalize_sites(
     sites: list[FinalSite], method: str, target: float
 ) -> list[FinalSite]:
@@ -709,26 +764,48 @@ def _log_confidence_summary(classification: ClassificationResult) -> None:
         )
 
 
+@dataclass
+class _AnalysisOutputs:
+    """Paths written by :func:`_write_analysis_csvs`; ``gene`` is None when calls are skipped."""
+
+    site: Path
+    qc: Path
+    wig: Path
+    prot_table: Path
+    gene: Path | None = None
+
+
 def _write_analysis_csvs(
-    sites: Iterable[FinalSite],
+    sites: list[FinalSite],
     annotations: Iterable[AnnotatedInsertionSite],
     classification: ClassificationResult | None,
     output_dir: Path,
     *,
     stem: str,
-    qc_sites: Iterable[FinalSite] | None = None,
-) -> tuple[Path, Path | None, Path]:
+    records: Iterable[object],
+    qc_sites: list[FinalSite] | None = None,
+) -> _AnalysisOutputs:
     output_dir.mkdir(parents=True, exist_ok=True)
     assignments = {
         (site.contig, site.position): tuple((gene.gene_id, gene.strand) for gene in site.genes)
         for site in annotations
     }
+    raw_sites = qc_sites if qc_sites is not None else sites
     site_path = write_final_dataset(output_dir / f"{stem}_sites.csv", sites, gene_assignments=assignments)
     # QC runs on raw counts: TTR pins the non-zero mean to its target, which would
     # otherwise hide the low-NZmean signal of an under-sequenced library.
-    qc_path = _write_qc(qc_sites if qc_sites is not None else sites, output_dir, stem=stem)
+    qc_path = _write_qc(raw_sites, output_dir, stem=stem)
+    # TRANSIT hand-off: raw counts as WIG (TRANSIT normalizes itself), plus the
+    # annotation as a prot_table.  Together they feed TRANSIT2's single-condition
+    # methods directly, or merge into a combined_wig for its comparative methods.
+    wig_path = write_wig(
+        output_dir / f"{stem}.wig", raw_sites,
+        comment="raw (un-normalized) insertion counts for TRANSIT; TRANSIT applies its own normalization",
+    )
+    prot_table_path = write_prot_table(output_dir / f"{stem}.prot_table", records)
+    outputs = _AnalysisOutputs(site=site_path, qc=qc_path, wig=wig_path, prot_table=prot_table_path)
     if classification is None:
-        return site_path, None, qc_path
+        return outputs
     gene_path = output_dir / f"{stem}_gene_essentiality.csv"
     with gene_path.open("w", encoding="utf-8", newline="") as handle:
         fields = [
@@ -763,7 +840,8 @@ def _write_analysis_csvs(
                 }
             )
     _log_confidence_summary(classification)
-    return site_path, gene_path, qc_path
+    outputs.gene = gene_path
+    return outputs
 
 
 def _render_final_dataset(

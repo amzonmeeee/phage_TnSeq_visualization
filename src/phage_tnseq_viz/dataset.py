@@ -149,6 +149,93 @@ def write_final_dataset(
     return path
 
 
+def write_wig(
+    path: str | Path,
+    sites: Iterable[FinalSite],
+    *,
+    comment: str | None = None,
+) -> Path:
+    """Write per-site counts as a TRANSIT-compatible variableStep WIG.
+
+    One ``variableStep chrom=<contig>`` section per contig, positions ascending.
+    The counts written are the values on the given sites as-is; callers hand this
+    the **raw, un-normalized** counts on purpose, because TRANSIT applies its own
+    normalization (TTR by default) when it builds a combined_wig.  Feeding it
+    already-normalized counts would normalize twice.
+
+    This is the file to hand to TRANSIT2 (with a prot_table) for its
+    single-condition methods, or to merge with other samples via TRANSIT's
+    ``export combined_wig`` for the comparative methods.
+    """
+    by_contig: dict[str, list[tuple[int, float]]] = {}
+    for site in coalesce_final_sites(sites):
+        by_contig.setdefault(site.contig, []).append((site.position, site.read_count))
+
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="\n") as handle:
+        if comment:
+            handle.write(f"# {comment}\n")
+        for contig in sorted(by_contig):
+            handle.write(f"variableStep chrom={contig}\n")
+            for position, count in sorted(by_contig[contig]):
+                handle.write(f"{position} {_format_wig_count(count)}\n")
+    return path
+
+
+def _format_wig_count(value: float) -> str:
+    """Format a count without scientific notation, keeping integers integral.
+
+    ``%g`` would render a hypersaturated site such as 4000000 as ``4e+06``; a
+    plain integer is what TRANSIT and TPP write and what tools expect.
+    """
+    number = float(value)
+    if number.is_integer():
+        return str(int(number))
+    return repr(number)
+
+
+def write_prot_table(path: str | Path, records: Iterable[object]) -> Path:
+    """Write gene annotations as a TRANSIT prot_table (9-column TSV).
+
+    ``records`` is any iterable of objects exposing ``genes``, each gene exposing
+    ``start``, ``end``, ``strand`` (``+1``/``-1`` or ``+``/``-``), and optionally
+    ``product``/``function`` and ``locus``.  The columns follow TRANSIT's order:
+    description, start, end, strand, protein length (aa), two unused fields, gene
+    name, and ORF id.
+
+    The format has no contig column, so a multi-contig reference is written as one
+    flat table; that is unambiguous only for the single-contig phage genomes this
+    tool targets, matching TRANSIT's own single-genome assumption.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="\n") as handle:
+        for record in records:
+            accession = getattr(record, "accession", "") or ""
+            for gene in getattr(record, "genes", ()):
+                start = int(gene.start)
+                end = int(gene.end)
+                strand = "+" if _strand_is_forward(gene.strand) else "-"
+                aa_length = max(0, (end - start + 1) // 3 - 1)
+                description = getattr(gene, "product", None) or getattr(gene, "function", None) or "-"
+                description = " ".join(str(description).split()) or "-"
+                locus = getattr(gene, "locus", None)
+                orf_id = str(locus) if locus else f"{accession}:{start}-{end}"
+                handle.write(
+                    "\t".join(
+                        [description, str(start), str(end), strand, str(aa_length),
+                         "-", "-", "-", orf_id]
+                    )
+                    + "\n"
+                )
+    return path
+
+
+def _strand_is_forward(strand: object) -> bool:
+    return strand in (1, "+1", "+")
+
+
 def final_site_from_count(count: object) -> FinalSite:
     """Convert a pipeline ``InsertionCount`` or averaged-count-like object."""
     contig = getattr(count, "contig")
@@ -313,4 +400,6 @@ __all__ = [
     "group_counts_for_plotting",
     "load_final_dataset",
     "write_final_dataset",
+    "write_prot_table",
+    "write_wig",
 ]

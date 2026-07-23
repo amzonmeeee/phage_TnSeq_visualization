@@ -137,7 +137,10 @@ def test_ttr_normalization_preserves_calls_and_reports_raw_qc(tmp_path: Path):
     ]
     raw_dir = tmp_path / "raw"
     ttr_dir = tmp_path / "ttr"
-    assert main(common + ["-o", str(raw_dir / "m.svg"), "--csv-dir", str(raw_dir)]) == 0
+    # Pin the baseline to none; the default is now auto (which normalizes on the
+    # plot path), so an un-normalized reference must be requested explicitly.
+    assert main(common + ["-o", str(raw_dir / "m.svg"), "--csv-dir", str(raw_dir),
+                          "--normalize", "none"]) == 0
     assert main(common + ["-o", str(ttr_dir / "m.svg"), "--csv-dir", str(ttr_dir),
                           "--normalize", "ttr"]) == 0
 
@@ -162,3 +165,115 @@ def test_ttr_normalization_preserves_calls_and_reports_raw_qc(tmp_path: Path):
     with (raw_dir / "m_sites.csv").open() as handle:
         raw_max = max(float(row["read_count"]) for row in csv.DictReader(handle))
     assert float(qc_row["max_count"]) == pytest.approx(raw_max)
+
+
+def test_plot_emits_wig_and_prot_table_and_accepts_wig_input(tmp_path: Path):
+    """The TRANSIT hand-off: raw WIG + prot_table out, and WIG back in."""
+
+    import csv
+
+    counts = tmp_path / "final.csv"
+    counts.write_text("TA_site,read_count\n300,8\n500,0\n700,4\n", encoding="utf-8")
+    out_dir = tmp_path / "out"
+
+    rc = main([
+        "plot", str(EXAMPLES / "example_annotated.gbk"),
+        "--final-dataset", str(counts),
+        "--no-insertion-sites", "--no-insertion-density",
+        "-o", str(out_dir / "m.svg"), "--csv-dir", str(out_dir),
+    ])
+    assert rc == 0
+
+    wig = out_dir / "m.wig"
+    prot_table = out_dir / "m.prot_table"
+    assert wig.exists() and prot_table.exists()
+    assert "variableStep chrom=" in wig.read_text()
+    # prot_table rows have the ORF at index 8, the way TRANSIT reads it.
+    first_gene = prot_table.read_text().splitlines()[0].split("\t")
+    assert len(first_gene) >= 9 and first_gene[8]
+
+    # Feed the emitted WIG straight back as the dataset; it must be accepted and
+    # reproduce the same gene calls as the CSV it came from.
+    from_csv = out_dir / "m_gene_essentiality.csv"
+    rt_dir = tmp_path / "rt"
+    rc = main([
+        "plot", str(EXAMPLES / "example_annotated.gbk"),
+        "--final-dataset", str(wig),
+        "--no-insertion-sites", "--no-insertion-density",
+        "-o", str(rt_dir / "m.svg"), "--csv-dir", str(rt_dir),
+    ])
+    assert rc == 0
+
+    def calls(path: Path) -> dict[str, str]:
+        with path.open() as handle:
+            return {row["gene_id"]: row["final_call"] for row in csv.DictReader(handle)}
+
+    assert calls(from_csv) == calls(rt_dir / "m_gene_essentiality.csv")
+
+
+def test_ttr_normalization_leaves_the_transit_wig_raw(tmp_path: Path):
+    """The WIG must carry raw counts even under --normalize ttr, because TRANSIT
+    normalizes itself and would otherwise double-normalize."""
+
+    counts = tmp_path / "final.csv"
+    counts.write_text("TA_site,read_count\n300,8\n500,0\n700,40\n900,4\n", encoding="utf-8")
+    out_dir = tmp_path / "out"
+
+    rc = main([
+        "plot", str(EXAMPLES / "example_annotated.gbk"),
+        "--final-dataset", str(counts),
+        "--no-insertion-sites", "--no-insertion-density",
+        "-o", str(out_dir / "m.svg"), "--csv-dir", str(out_dir),
+        "--normalize", "ttr",
+    ])
+    assert rc == 0
+
+    # The WIG holds the raw inputs; TTR scaled the CSV's read_count to something else.
+    wig_counts = {}
+    for line in (out_dir / "m.wig").read_text().splitlines():
+        if line.startswith(("#", "variableStep")):
+            continue
+        pos, value = line.split()
+        wig_counts[int(pos)] = float(value)
+    assert wig_counts[300] == 8.0
+    assert wig_counts[700] == 40.0
+
+    import csv
+    with (out_dir / "m_sites.csv").open() as handle:
+        normalized = {int(r["position"]): float(r["read_count"]) for r in csv.DictReader(handle)}
+    # Normalization actually changed the CSV values, so the WIG staying raw is meaningful.
+    assert normalized[700] != 40.0
+
+
+def test_normalize_auto_resolves_by_whether_counts_came_from_tpp():
+    from phage_tnseq_viz.cli import _resolve_normalize
+
+    # The plot path (own data, not via TPP): auto normalizes here.
+    assert _resolve_normalize("auto", from_tpp=False) == "ttr"
+    # The process path (counts from TPP -> TRANSIT): auto defers.
+    assert _resolve_normalize("auto", from_tpp=True) == "none"
+    # An explicit choice always wins over auto, on either path.
+    assert _resolve_normalize("none", from_tpp=False) == "none"
+    assert _resolve_normalize("ttr", from_tpp=True) == "ttr"
+
+
+def test_normalize_none_keeps_the_plot_counts_raw(tmp_path: Path):
+    """auto normalizes the plot path, so --normalize none is how you opt out."""
+
+    import csv
+
+    counts = tmp_path / "final.csv"
+    counts.write_text("TA_site,read_count\n300,8\n500,0\n700,40\n", encoding="utf-8")
+    out = tmp_path / "out"
+
+    assert main([
+        "plot", str(EXAMPLES / "example_annotated.gbk"), "--final-dataset", str(counts),
+        "--no-insertion-sites", "--no-insertion-density",
+        "-o", str(out / "m.svg"), "--csv-dir", str(out), "--normalize", "none",
+    ]) == 0
+
+    with (out / "m_sites.csv").open() as handle:
+        by_pos = {int(r["position"]): r for r in csv.DictReader(handle)}
+    # Untouched: read_count equals the input and no raw_read_count shadow is set.
+    assert float(by_pos[700]["read_count"]) == 40.0
+    assert by_pos[700]["raw_read_count"] == ""

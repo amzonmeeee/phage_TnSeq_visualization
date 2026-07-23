@@ -83,7 +83,8 @@ phage-tnseq-viz plot demo/example_annotated.gbk \
 ```
 
 This writes `example_map.png`, `example_map_sites.csv`,
-`example_map_gene_essentiality.csv`, and `example_map_qc.csv`.
+`example_map_gene_essentiality.csv`, `example_map_qc.csv`, and the TRANSIT2
+hand-off pair `example_map.wig` + `example_map.prot_table`.
 
 ## Use a final dataset you already processed
 
@@ -162,6 +163,11 @@ NC_012345.1,415,0
   are preserved in the normalised output.
 - Duplicate rows at the same coordinate are merged by summing counts.
 
+`--final-dataset` also accepts a **TRANSIT/TPP `.wig`** (or `.wig.gz`) directly,
+so counts you already have in WIG form need no conversion. The `chrom=` names in
+a supplied WIG are trusted as the contig identifiers (remap with
+`--contig-alias` if they differ from the GenBank accession).
+
 For saturation-based essentiality, the table must represent **every candidate
 insertion site, including zero-count sites**. By default the direct path fills
 missing sites using the selected motif (`mariner`/`himar1` = `TA`). Set
@@ -224,6 +230,8 @@ run_phage_A/
   final_sites.csv
   final_gene_essentiality.csv
   final_qc.csv                    # library QC metrics
+  final.wig                       # raw counts for TRANSIT2
+  final.prot_table                # annotation for TRANSIT2
   tnseq_map.png
 ```
 
@@ -277,22 +285,33 @@ assumed to be alignable.
 ### TTR normalization (an alternative to subsampling)
 
 Subsampling makes libraries comparable by throwing reads away until they share a
-depth. `--normalize ttr` reaches the same goal without discarding anything: it
-rescales each contig so its typical non-zero count meets a fixed target (default
-100), so a library run entirely on its own still lands on the same scale as any
-other.
+depth. TTR reaches the same goal without discarding anything: it rescales each
+contig so its typical non-zero count meets a fixed target (default 100), so a
+library run entirely on its own still lands on the same scale as any other. The
+factor is `target / (density × trimmed_mean_of_hit_sites)`, dropping the top and
+bottom 5% of non-zero counts before averaging so a few hypersaturated sites
+cannot set the scale for the whole library. This is TRANSIT's default (TTR =
+Trimmed Total Reads); change the target with `--norm-target`.
+
+**The workflow normalizes exactly once, and prefers the TPP/TRANSIT toolchain to
+do it.** `--normalize` defaults to `auto`, which resolves by where the counts
+came from:
+
+| Path | `auto` resolves to | Why |
+|---|---|---|
+| `plot` (you supply the counts) | **TTR here** | The data never went through TPP/TRANSIT, so this tool normalizes it, and the workflow still normalizes once. |
+| `process` (this tool ran TPP) | **defer** | The counts came from TPP and the exported `.wig` is raw, so TRANSIT applies its own TTR when it imports it. Normalizing here too would be twice. |
+
+Force it either way with `--normalize none` or `--normalize ttr`; an explicit
+choice always wins over `auto`. TTR is idempotent (normalizing already-normalized
+counts is a no-op), so the "exactly once" guarantee is about intent, not safety.
+The **exported `.wig` is always raw** regardless, so TRANSIT never double-counts.
 
 ```bash
-phage-tnseq-viz plot phage_A.gbk --final-dataset A_final.csv -o A.png --normalize ttr
-phage-tnseq-viz plot phage_B.gbk --final-dataset B_final.csv -o B.png --normalize ttr
+# Comparing two libraries you processed yourself: auto normalizes both here.
+phage-tnseq-viz plot phage_A.gbk --final-dataset A_final.csv -o A.png
+phage-tnseq-viz plot phage_B.gbk --final-dataset B_final.csv -o B.png
 ```
-
-The factor is `target / (density × trimmed_mean_of_hit_sites)`, dropping the top
-and bottom 5% of non-zero counts before averaging so a few hypersaturated sites
-cannot set the scale for the whole library. This is TRANSIT's default (TTR =
-Trimmed Total Reads), available on both the `plot` and `process` paths and
-computed per contig, since phage contigs are not sequenced to comparable depths.
-Change the target with `--norm-target`.
 
 Two things are worth being clear about:
 
@@ -308,6 +327,44 @@ Two things are worth being clear about:
 
 TTR corrects for depth only. It does not fix a position-dependent coverage
 gradient or a genuinely different insertion-site distribution between libraries.
+
+## Hand off to TRANSIT2 for comparative statistics
+
+This tool calls essentiality in a single condition and draws the map. For
+*comparing* conditions — resampling, ANOVA, ZINB, genetic interactions — the
+established tool is [TRANSIT2](https://github.com/ioerger/transit2), and there is
+no reason to reimplement its statistics here. Every run therefore also writes the
+two files TRANSIT needs, next to the CSVs:
+
+- **`<stem>.wig`** — the per-site counts as a TRANSIT `variableStep` WIG.
+- **`<stem>.prot_table`** — the gene annotation in TRANSIT's 9-column format.
+
+With those, TRANSIT's single-condition methods run directly:
+
+```bash
+python3 transit.py gumbel <stem>.wig <stem>.prot_table gumbel_out.txt
+```
+
+and for the comparative methods, TRANSIT merges several runs' WIGs into a
+combined_wig itself (you supply a small samples-metadata TSV of Id / Condition /
+Filename):
+
+```bash
+python3 transit.py export combined_wig \
+  phageA.wig,phageB.wig <stem>.prot_table combined.cwig
+python3 transit.py resampling combined.cwig metadata.tsv <stem>.prot_table out.txt \
+  --conditions conditionA,conditionB
+```
+
+The one thing to get right — and it is handled for you — is that **the exported
+WIG holds raw, un-normalized counts.** TRANSIT applies its own normalization (TTR
+by default) when it builds the combined_wig, so handing it already-normalized
+counts would normalize twice. This is exactly why `--normalize auto` *defers* on
+the `process` path (see above): any TTR this tool applies affects only its own
+map and `read_count` column, and the WIG stays raw regardless.
+
+(The prot_table has no contig column, matching TRANSIT's single-genome model, so
+this is cleanest for the single-contig phage genomes this tool targets.)
 
 ## Library quality control
 
