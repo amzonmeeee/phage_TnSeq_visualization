@@ -202,6 +202,41 @@ def export_reference_fasta(
     return output_fasta
 
 
+def reference_contig_ids(
+    reference_genbank: str | Path,
+    *,
+    replicon_ids: Sequence[str] | None = None,
+) -> list[str]:
+    """Return the contig name to use for each GenBank record, in file order.
+
+    This is the single source of truth for contig identity across the raw-read
+    path.  TPP's WIG header cannot supply it: TPP writes ``chrom=`` as the
+    reference FASTA's basename truncated at the first dot, which is the same
+    string for every replicon and never the accession.  Contig identity is
+    therefore taken from the reference itself, and from the ``-replicon-ids``
+    that TPP echoes into its per-replicon output *filenames*.
+    """
+    from Bio import SeqIO
+
+    records = list(SeqIO.parse(str(reference_genbank), "genbank"))
+    if not records:
+        raise PipelineError(f"No GenBank records found in {reference_genbank}")
+    if replicon_ids is None:
+        contigs = [record.id for record in records]
+    else:
+        if len(replicon_ids) != len(records):
+            raise PipelineError(
+                "replicon_ids must contain exactly one ID for each GenBank record"
+            )
+        contigs = [str(item).strip() for item in replicon_ids]
+    for contig in contigs:
+        if not contig:
+            raise PipelineError("reference contig has no identifier")
+    if len(set(contigs)) != len(contigs):
+        raise PipelineError("reference contig identifiers must be unique")
+    return contigs
+
+
 def candidate_insertion_sites(
     reference_genbank: str | Path,
     *,
@@ -226,16 +261,10 @@ def candidate_insertion_sites(
     records = list(SeqIO.parse(str(reference_genbank), "genbank"))
     if not records:
         raise PipelineError(f"No GenBank records found in {reference_genbank}")
-    if replicon_ids is not None and len(replicon_ids) != len(records):
-        raise PipelineError(
-            "replicon_ids must contain exactly one ID for each GenBank record"
-        )
+    contigs = reference_contig_ids(reference_genbank, replicon_ids=replicon_ids)
 
     candidates: dict[str, list[int]] = {}
-    for index, record in enumerate(records):
-        contig = replicon_ids[index] if replicon_ids is not None else record.id
-        if not contig:
-            raise PipelineError("reference contig has no identifier")
+    for contig, record in zip(contigs, records):
         sequence = str(record.seq)
         if mode == "himar1":
             # TA is palindromic, so one scan fully enumerates insertion positions.
@@ -310,6 +339,14 @@ def run_pipeline(
             wig_files=(),
         )
 
+    contigs = reference_contig_ids(reference_genbank, replicon_ids=config.tpp_replicon_ids)
+    if len(contigs) > 1 and config.tpp_replicon_ids is None:
+        raise PipelineError(
+            f"{reference_genbank} contains {len(contigs)} records, so TPP needs "
+            "--tpp-replicon-ids with one ID per record; without it TPP cannot write "
+            "separate per-contig WIG files and the counts cannot be told apart"
+        )
+
     candidate_sites = (
         candidate_insertion_sites(
             reference_genbank,
@@ -335,8 +372,8 @@ def run_pipeline(
                 tools=tools,
             )
         )
-        wig_files = _find_tpp_wig_files(prefix)
-        rows = _parse_wig_files(wig_files)
+        wig_pairs = _find_tpp_wig_files(prefix, contigs)
+        rows = _parse_wig_files(wig_pairs)
         if candidate_sites is not None:
             rows = fill_missing_candidate_sites(rows, candidate_sites)
         rows = apply_read_count_threshold(rows, config.minimum_mapped_reads)
@@ -344,7 +381,7 @@ def run_pipeline(
             reference_fasta=reference_fasta,
             processed_reads=current_reads,
             commands=tuple(commands),
-            wig_files=tuple(wig_files),
+            wig_files=tuple(path for path, _contig in wig_pairs),
             counts=tuple(rows),
         )
 
@@ -376,9 +413,9 @@ def run_pipeline(
                 tools=tools,
             )
         )
-        wig_files = _find_tpp_wig_files(prefix)
-        all_wig_files.extend(wig_files)
-        rows = _parse_wig_files(wig_files)
+        wig_pairs = _find_tpp_wig_files(prefix, contigs)
+        all_wig_files.extend(path for path, _contig in wig_pairs)
+        rows = _parse_wig_files(wig_pairs)
         if candidate_sites is not None:
             rows = fill_missing_candidate_sites(rows, candidate_sites)
         replicate_tables.append(rows)
@@ -570,26 +607,35 @@ def parse_tpp_wig(
     path: str | Path,
     *,
     default_contig: str | None = None,
+    contig: str | None = None,
 ) -> list[InsertionCount]:
     """Parse a TPP WIG file into sorted, coalesced insertion-count records.
 
     Both ``variableStep`` (the usual TPP form) and ``fixedStep`` WIG sections are
     accepted.  Duplicate coordinate lines are summed defensively.  A headerless
     two-column file is also accepted when a single ``default_contig`` is supplied.
+
+    ``contig`` overrides whatever the header declares.  TPP output requires it:
+    TPP writes the reference FASTA's basename into ``chrom=`` rather than a
+    contig name, so every replicon of a multi-contig run claims the same one.
     """
     path = Path(path)
     opener = gzip.open if path.suffix.lower() == ".gz" else open
     with opener(path, "rt", encoding="utf-8") as handle:
-        return parse_tpp_wig_lines(handle, default_contig=default_contig)
+        return parse_tpp_wig_lines(handle, default_contig=default_contig, contig=contig)
 
 
 def parse_tpp_wig_lines(
     lines: Iterable[str],
     *,
     default_contig: str | None = None,
+    contig: str | None = None,
 ) -> list[InsertionCount]:
     """Line-oriented implementation of :func:`parse_tpp_wig` for unit tests."""
-    contig = default_contig
+    if contig is not None and not contig.strip():
+        raise PipelineError("contig override must not be blank")
+    override = contig.strip() if contig is not None else None
+    contig = override or default_contig
     fixed_position: int | None = None
     fixed_step = 1
     counts: dict[tuple[str, int], float] = {}
@@ -602,9 +648,10 @@ def parse_tpp_wig_lines(
         directive = fields[0].lower()
         if directive in {"variablestep", "fixedstep"}:
             attrs = _wig_attributes(fields[1:], line_number)
-            contig = attrs.get("chrom") or attrs.get("chromosome")
-            if not contig:
+            declared = attrs.get("chrom") or attrs.get("chromosome")
+            if not declared:
                 raise PipelineError(f"WIG line {line_number}: step declaration lacks chrom=")
+            contig = override or declared
             if directive == "fixedstep":
                 try:
                     fixed_position = int(attrs.get("start", "1"))
@@ -759,12 +806,21 @@ def _validate_pair_shape(reads: ReadPair, output_reads: ReadPair) -> None:
 
 
 def _wig_attributes(fields: Sequence[str], line_number: int) -> dict[str, str]:
+    """Parse ``key=value`` step attributes, tolerating TPP's comma separators.
+
+    A multi-replicon TPP run writes ``variableStep chrom=<ref>, replicon=<i>``.
+    The trailing comma is not valid WIG, so it is stripped rather than becoming
+    part of the contig name.
+    """
     attrs: dict[str, str] = {}
     for field in fields:
+        field = field.rstrip(",")
+        if not field:
+            continue
         if "=" not in field:
             raise PipelineError(f"WIG line {line_number}: malformed step attribute {field!r}")
         key, value = field.split("=", 1)
-        attrs[key.lower()] = value
+        attrs[key.lower()] = value.strip()
     return attrs
 
 
@@ -787,25 +843,47 @@ def _trimmed_read_pair(reads: ReadPair, output_dir: Path) -> ReadPair:
     return ReadPair(out1, out2, reads.sample_id)
 
 
-def _find_tpp_wig_files(prefix: Path) -> list[Path]:
-    """Find TPP's one WIG or its per-replicon WIG files after a successful run."""
-    direct = prefix.with_suffix(".wig")
-    candidates = sorted(prefix.parent.glob(f"{prefix.name}*.wig"))
-    if direct.exists() and direct not in candidates:
-        candidates.insert(0, direct)
-    if not candidates:
+def _find_tpp_wig_files(prefix: Path, contigs: Sequence[str]) -> list[tuple[Path, str]]:
+    """Pair each TPP WIG with the contig it holds, using TPP's own naming rule.
+
+    TPP writes ``<prefix>.wig`` for a single-replicon reference and
+    ``<prefix>_<replicon_id>.wig`` for each replicon otherwise, where the IDs are
+    exactly what was passed to ``-replicon-ids``.  The filename is the only place
+    TPP records which replicon a file belongs to; its ``chrom=`` header does not.
+    """
+    if not contigs:
+        raise PipelineError("at least one reference contig is required")
+
+    if len(contigs) == 1:
+        path = prefix.with_name(f"{prefix.name}.wig")
+        if not path.exists():
+            raise PipelineError(
+                f"TPP completed but {path.name!r} was not found in {prefix.parent}"
+            )
+        return [(path, contigs[0])]
+
+    pairs: list[tuple[Path, str]] = []
+    missing: list[str] = []
+    for contig in contigs:
+        path = prefix.with_name(f"{prefix.name}_{contig}.wig")
+        if path.exists():
+            pairs.append((path, contig))
+        else:
+            missing.append(path.name)
+    if missing:
         raise PipelineError(
-            f"TPP completed but no .wig output beginning with {prefix.name!r} was found in "
-            f"{prefix.parent}"
+            "TPP completed but these per-replicon WIG files were not found in "
+            f"{prefix.parent}: {', '.join(missing)}. Check that --tpp-replicon-ids "
+            "matches the reference record order."
         )
-    return candidates
+    return pairs
 
 
-def _parse_wig_files(paths: Iterable[Path]) -> list[InsertionCount]:
-    """Coalesce one or more WIGs (for example, a multi-contig TPP run)."""
+def _parse_wig_files(pairs: Iterable[tuple[Path, str]]) -> list[InsertionCount]:
+    """Parse per-replicon WIGs, forcing each one's contig name."""
     rows: list[InsertionCount] = []
-    for path in paths:
-        rows.extend(parse_tpp_wig(path))
+    for path, contig in pairs:
+        rows.extend(parse_tpp_wig(path, contig=contig))
     count_map = _count_map(rows)
     return [
         InsertionCount(contig, position, count)
