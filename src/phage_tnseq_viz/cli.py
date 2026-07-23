@@ -49,6 +49,7 @@ from .pipeline import (
     run_pipeline,
 )
 from .plot import PAPER_SIZES, PlotOptions, render
+from . import qc
 from .transposon import PRESETS, Transposon, find_insertion_sites, resolve_transposon
 
 
@@ -297,7 +298,7 @@ def _run_plot(args: argparse.Namespace) -> int:
         gap_analysis=not args.no_gap_analysis,
     )
     csv_dir = Path(args.csv_dir) if args.csv_dir else (output.parent if output.parent != Path("") else Path("."))
-    site_csv, gene_csv = _write_analysis_csvs(
+    site_csv, gene_csv, qc_csv = _write_analysis_csvs(
         sites, annotations, result, csv_dir, stem=output.stem
     )
     out = _render_final_dataset(
@@ -306,6 +307,7 @@ def _run_plot(args: argparse.Namespace) -> int:
     logger.info("Done. Wrote %s\n      • %s", out, site_csv)
     if gene_csv:
         logger.info("      • %s", gene_csv)
+    logger.info("      • %s", qc_csv)
     return 0
 
 
@@ -376,12 +378,13 @@ def _run_process(args: argparse.Namespace) -> int:
         binomial_short_genes=not args.no_binomial_short_genes,
         gap_analysis=not args.no_gap_analysis,
     )
-    site_csv, gene_csv = _write_analysis_csvs(
+    site_csv, gene_csv, qc_csv = _write_analysis_csvs(
         sites, annotations, classification, output_dir, stem="final"
     )
     logger.info("      • final site table: %s", site_csv)
     if gene_csv:
         logger.info("      • gene calls: %s", gene_csv)
+    logger.info("      • library QC: %s", qc_csv)
 
     if args.no_plot:
         return 0
@@ -580,6 +583,31 @@ def _annotate_and_classify(
     )
 
 
+def _write_qc(sites: Iterable[FinalSite], output_dir: Path, *, stem: str) -> Path:
+    """Write the library QC table and report it, warnings first.
+
+    The table is logged as well as written because it is the thing a user most
+    needs to see before trusting the calls, and a file alongside two others is
+    easy to never open.
+    """
+    import csv
+
+    results = qc.stats_by_contig((site.contig, site.read_count) for site in sites)
+    path = output_dir / f"{stem}_qc.csv"
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(qc.TABLE_COLUMNS))
+        writer.writeheader()
+        for stats in results:
+            writer.writerow(qc.as_row(stats))
+
+    for line in qc.format_table(results):
+        logger.info("      %s", line)
+    for stats in results:
+        for warning in stats.warnings:
+            logger.warning("library QC (%s): %s", stats.dataset or "contig", warning)
+    return path
+
+
 def _gap_columns(gap: GapEvidence | None) -> dict[str, str]:
     """Render gap evidence as CSV cells, blank throughout when it was not run."""
     if gap is None:
@@ -603,15 +631,16 @@ def _write_analysis_csvs(
     output_dir: Path,
     *,
     stem: str,
-) -> tuple[Path, Path | None]:
+) -> tuple[Path, Path | None, Path]:
     output_dir.mkdir(parents=True, exist_ok=True)
     assignments = {
         (site.contig, site.position): tuple((gene.gene_id, gene.strand) for gene in site.genes)
         for site in annotations
     }
     site_path = write_final_dataset(output_dir / f"{stem}_sites.csv", sites, gene_assignments=assignments)
+    qc_path = _write_qc(sites, output_dir, stem=stem)
     if classification is None:
-        return site_path, None
+        return site_path, None, qc_path
     gene_path = output_dir / f"{stem}_gene_essentiality.csv"
     with gene_path.open("w", encoding="utf-8", newline="") as handle:
         fields = [
@@ -642,7 +671,7 @@ def _write_analysis_csvs(
                     **_gap_columns(call.gap),
                 }
             )
-    return site_path, gene_path
+    return site_path, gene_path, qc_path
 
 
 def _render_final_dataset(

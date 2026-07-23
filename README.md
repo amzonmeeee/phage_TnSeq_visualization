@@ -82,8 +82,8 @@ phage-tnseq-viz plot demo/example_annotated.gbk \
   --csv-dir demo/results
 ```
 
-This writes `example_map.png`, `example_map_sites.csv`, and
-`example_map_gene_essentiality.csv`.
+This writes `example_map.png`, `example_map_sites.csv`,
+`example_map_gene_essentiality.csv`, and `example_map_qc.csv`.
 
 ## Use a final dataset you already processed
 
@@ -223,6 +223,7 @@ run_phage_A/
   processing_manifest.json         # exact commands, paths, parameters
   final_sites.csv
   final_gene_essentiality.csv
+  final_qc.csv                    # library QC metrics
   tnseq_map.png
 ```
 
@@ -272,6 +273,53 @@ then each subsample is independently processed by TPP. Counts are thresholded
 per subsample and the final CSV reports their mean and population standard
 deviation. The maps remain separate because phage genome coordinates are not
 assumed to be alignable.
+
+## Library quality control
+
+Every essentiality call rests on assumptions about the library: that enough
+candidate sites were hit to tell an essential gene from an unlucky one, and that
+the counts are not dominated by a few runaway sites. Both paths therefore print
+a QC table and write it to `<stem>_qc.csv`, so a result can be judged before it
+is believed.
+
+```text
+     contig  sites  hit  density   NZmean  NZmedian      max  skew   PTI
+  NC_TEST01   1293  188    0.145  21280.1       4.0  4000000  13.6  0.00
+warning: library QC (NC_TEST01): saturation 0.15 is below 0.30
+warning: library QC (NC_TEST01): top site has 4000000 reads, a likely outlier
+```
+
+That example shows why `NZmedian` sits next to `NZmean`: a mean of 21,280 against
+a median of 4 is the signature of a single site swallowing the library, which is
+also what `--read-histogram-cap` exists to make the map readable despite.
+
+| Metric | Meaning |
+|---|---|
+| `density` | Saturation: the fraction of candidate sites that were hit. |
+| `mean_count` | Mean count over **all** sites, zeros included. |
+| `nz_mean` / `nz_median` | Mean and median over hit sites only; a wide gap means outliers. |
+| `max_count` | Largest single-site count. |
+| `skewness` / `kurtosis` | Third and fourth moments over hit sites (kurtosis is excess, so 0 is normal). |
+| `pickands_tail_index` | Tail-weight estimate; higher means a few sites carry disproportionate reads. |
+
+The metric set and the warning thresholds follow TRANSIT's `tnseq_stats`, which
+is the established vocabulary for Tn-Seq QC. Two things differ, both because
+this tool targets phage:
+
+- Metrics are reported **per contig**, matching how saturation and read
+  thresholds are already computed elsewhere here.
+- The Pickands tail index is **adapted to small genomes**. It compares order
+  statistics at ranks M, 2M and 4M; TRANSIT scans a fixed M = 10..99, which
+  silently requires at least 397 sites and raises `IndexError` below that — and
+  a phage genome routinely has fewer. Here the scan is capped by the data
+  instead, so it agrees with TRANSIT exactly whenever TRANSIT's range applies
+  and reports nothing rather than crashing when it does not. Ranks that tie,
+  which happens once a sparse library's tail runs into the zero counts, are
+  skipped rather than poisoning the median.
+
+The thresholds themselves were derived from bacterial libraries. On a phage
+genome, with far fewer candidate sites, treat a warning as a prompt to look
+rather than a pass/fail verdict.
 
 ## Essentiality classification and colours
 
