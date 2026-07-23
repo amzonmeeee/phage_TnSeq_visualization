@@ -54,8 +54,9 @@ pytest
 ```
 
 The Python package includes Biopython, pyGenomeViz, matplotlib, and
-pyrodigal-gv. The raw-read route deliberately does **not** install external
-programs for you. Install the tools you plan to run (normally in a dedicated
+pyrodigal-gv. Interactive `.html` maps additionally need Plotly, installed via
+the optional `[interactive]` extra (`pip install ".[interactive]"`). The
+raw-read route deliberately does **not** install external programs for you. Install the tools you plan to run (normally in a dedicated
 conda environment) and make them available on `PATH`, or pass their paths with
 `--fastqc-bin`, `--fastp-bin`, `--tpp-bin`, `--bwa-bin`, and `--seqkit-bin`.
 
@@ -100,6 +101,38 @@ With final data, the plot defaults to the requested blue measured-count bars
 and essentiality gene arrows. The older dense theoretical insertion-site track is
 off by default; add `--show-theoretical-sites` if you want it too. Remove the
 blue bars with `--no-read-histogram`.
+
+Real Tn-Seq counts are heavy-tailed, so a single hypersaturated site can squash
+every other blue bar. Cap the read-count scale at a percentile of each contig's
+positive counts with `--read-histogram-cap 95`; taller bars clip to full height
+and the scale then reads `≥ N`.
+
+### Interactive HTML map
+
+The output format follows the `--output` extension: `.png`/`.svg` are the static
+maps, and **`.html` renders an interactive, zoomable map** (pan/zoom, and hover
+to read the exact per-site count, gene product, PHROG category, and essentiality
+call). The map is built with [Plotly](https://plotly.com/python/), and its
+`plotly.js` library is embedded directly in the file — the HTML is therefore
+fully self-contained and opens offline in any browser with no network access
+(and so each `.html` map is a few MB).
+
+```bash
+phage-tnseq-viz plot phage.gbk --final-dataset counts.csv -o phage_map.html
+```
+
+Interactive output needs Plotly, kept as an optional extra so the static path
+stays lightweight:
+
+```bash
+pip install ".[interactive]"   # or: pip install plotly
+```
+
+### Progress verbosity
+
+Every command prints stage progress by default. Use `-q`/`--quiet` to print only
+warnings and errors (handy in scripts and batch runs), or `-v`/`--verbose` for
+extra detail. Progress goes to stdout, warnings/errors to stderr.
 
 For a single-contig reference, a CSV may omit `contig`; the GenBank accession
 is used automatically. For multiple contigs, provide a contig column or map an

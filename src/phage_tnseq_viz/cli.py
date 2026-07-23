@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import asdict, replace
 import json
+import logging
 from pathlib import Path
 import shlex
 import subprocess
@@ -50,6 +51,55 @@ from .plot import PAPER_SIZES, PlotOptions, render
 from .transposon import PRESETS, Transposon, find_insertion_sites, resolve_transposon
 
 
+logger = logging.getLogger("phage_tnseq_viz")
+
+
+class _CliFormatter(logging.Formatter):
+    """Plain progress lines; ``warning:``/``error:`` prefixes for WARNING+."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        if record.levelno >= logging.WARNING:
+            return f"{record.levelname.lower()}: {record.getMessage()}"
+        return record.getMessage()
+
+
+class _MaxLevelFilter(logging.Filter):
+    def __init__(self, level: int) -> None:
+        super().__init__()
+        self._level = level
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return record.levelno <= self._level
+
+
+def _configure_logging(verbosity: int) -> None:
+    """Route package logging by verbosity: -1 quiet, 0 normal, 1 verbose.
+
+    INFO/DEBUG progress goes to stdout, WARNING/ERROR to stderr, so a caller can
+    still separate progress from problems.  Re-invoking (e.g. across tests)
+    rebuilds the handlers cleanly rather than stacking duplicates.
+    """
+    level = logging.WARNING if verbosity < 0 else logging.DEBUG if verbosity > 0 else logging.INFO
+    logger.setLevel(level)
+    logger.propagate = False
+    for handler in list(logger.handlers):
+        logger.removeHandler(handler)
+    formatter = _CliFormatter()
+    out = logging.StreamHandler(sys.stdout)
+    out.setLevel(logging.DEBUG)
+    out.addFilter(_MaxLevelFilter(logging.INFO))
+    out.setFormatter(formatter)
+    err = logging.StreamHandler(sys.stderr)
+    err.setLevel(logging.WARNING)
+    err.setFormatter(formatter)
+    logger.addHandler(out)
+    logger.addHandler(err)
+
+
+def _verbosity(args: argparse.Namespace) -> int:
+    return (1 if getattr(args, "verbose", False) else 0) - (1 if getattr(args, "quiet", False) else 0)
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the backwards-compatible bare ``phage-tnseq-viz GENOME.gbk`` parser."""
     p = argparse.ArgumentParser(
@@ -84,6 +134,7 @@ def build_process_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     p.add_argument("input", help="Reference phage genome in GenBank (.gbk/.gb) format.")
+    _add_verbosity_arguments(p)
     p.add_argument("--reads1", required=True, help="Read 1 FASTQ(.gz).")
     p.add_argument("--reads2", default=None, help="Optional read 2 FASTQ(.gz).")
     p.add_argument("-o", "--output-dir", default="tnseq_run", help="Run-output directory.")
@@ -125,15 +176,22 @@ def build_process_parser() -> argparse.ArgumentParser:
     final.add_argument("--no-read-histogram", action="store_true", help="Do not draw blue per-site read-count bars.")
     final.add_argument("--read-histogram-cap", type=float, default=None, metavar="PCT", help="Cap the read-histogram scale at this percentile (e.g. 95) of each contig's positive counts; taller bars clip to full height and the scale reads '≥ N'.")
     final.add_argument("--no-plot", action="store_true", help="Write final CSV(s) but do not render an image.")
-    final.add_argument("--plot-output", default="tnseq_map.png", help="Map filename, relative to --output-dir unless absolute.")
+    final.add_argument("--plot-output", default="tnseq_map.png", help="Map filename, relative to --output-dir unless absolute. Use a .html extension for an interactive map.")
     final.add_argument("--show-candidate-sites", action="store_true", help="Also draw potential TA insertion ticks on the processed-data map.")
     return p
 
 
+def _add_verbosity_arguments(p: argparse.ArgumentParser) -> None:
+    g = p.add_mutually_exclusive_group()
+    g.add_argument("-q", "--quiet", action="store_true", help="Only print warnings and errors.")
+    g.add_argument("-v", "--verbose", action="store_true", help="Print extra debug detail.")
+
+
 def _add_plot_arguments(p: argparse.ArgumentParser) -> None:
     p.add_argument("input", help="Input phage genome in GenBank (.gbk/.gb) format.")
-    p.add_argument("-o", "--output", default="phage_map.png", help="Output image path (.png or .svg).")
+    p.add_argument("-o", "--output", default="phage_map.png", help="Output path. Extension picks the format: .png/.svg (static) or .html (interactive, zoomable, needs the [interactive] extra).")
     p.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
+    _add_verbosity_arguments(p)
 
     g_tn = p.add_argument_group("transposon / candidate sites")
     g_tn.add_argument(
@@ -185,14 +243,17 @@ def _add_plot_arguments(p: argparse.ArgumentParser) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] == "process":
+        args, run = build_process_parser().parse_args(argv[1:]), _run_process
+    elif argv and argv[0] == "plot":
+        args, run = build_plot_parser().parse_args(argv[1:]), _run_plot
+    else:
+        args, run = build_parser().parse_args(argv), _run_plot
+    _configure_logging(_verbosity(args))
     try:
-        if argv and argv[0] == "process":
-            return _run_process(build_process_parser().parse_args(argv[1:]))
-        if argv and argv[0] == "plot":
-            return _run_plot(build_plot_parser().parse_args(argv[1:]))
-        return _run_plot(build_parser().parse_args(argv))
+        return run(args)
     except (DatasetError, PipelineError, ValueError, OSError, RuntimeError) as exc:
-        print(f"error: {exc}", file=sys.stderr)
+        logger.error("%s", exc)
         return 1
 
 
@@ -206,8 +267,8 @@ def _run_plot(args: argparse.Namespace) -> int:
     output = Path(args.output)
 
     if not args.final_dataset:
-        out = render(records, insertion_sites, options, output, transposon_label=_transposon_label(transposon))
-        print(f"Done. Wrote {out}")
+        out = _dispatch_render(records, insertion_sites, options, output, transposon)
+        logger.info("Done. Wrote %s", out)
         return 0
 
     default_contig = records[0].accession if len(records) == 1 else None
@@ -218,9 +279,8 @@ def _run_plot(args: argparse.Namespace) -> int:
         candidates = _candidate_sites(records, transposon, candidate_model, args.single_strand)
         sites = fill_missing_final_sites(sites, candidates)
     if candidate_model == "all-bases" and not args.no_essentiality:
-        print(
-            "warning: all-bases candidate model adapts a TA-site classifier; validate it for your transposon.",
-            file=sys.stderr,
+        logger.warning(
+            "all-bases candidate model adapts a TA-site classifier; validate it for your transposon."
         )
 
     annotations, result = _annotate_and_classify(
@@ -233,9 +293,9 @@ def _run_plot(args: argparse.Namespace) -> int:
     out = _render_final_dataset(
         records, insertion_sites, options, output, transposon, sites, result
     )
-    print(f"Done. Wrote {out}\n      • {site_csv}")
+    logger.info("Done. Wrote %s\n      • %s", out, site_csv)
     if gene_csv:
-        print(f"      • {gene_csv}")
+        logger.info("      • %s", gene_csv)
     return 0
 
 
@@ -280,7 +340,7 @@ def _run_process(args: argparse.Namespace) -> int:
         subsample_replicates=args.subsample_replicates,
         subsample_seed=args.subsample_seed,
     )
-    print("[1/3] Processing reads (selected external stages only) ...")
+    logger.info("[1/3] Processing reads (selected external stages only) ...")
     result = run_pipeline(
         reference,
         ReadPair(reads1, reads2, args.sample_id),
@@ -292,10 +352,10 @@ def _run_process(args: argparse.Namespace) -> int:
 
     counts = result.averaged_counts or result.counts
     if not counts:
-        print("TPP was skipped: wrote reference/processing artifacts only; use `plot --final-dataset` to visualise externally processed counts.")
+        logger.info("TPP was skipped: wrote reference/processing artifacts only; use `plot --final-dataset` to visualise externally processed counts.")
         return 0
 
-    print("[2/3] Annotating final insertion sites and calling essentiality ...")
+    logger.info("[2/3] Annotating final insertion sites and calling essentiality ...")
     records = _load_records(reference, None, False)
     sites = final_sites_from_counts(counts)
     annotations, classification = _annotate_and_classify(
@@ -304,13 +364,13 @@ def _run_process(args: argparse.Namespace) -> int:
     site_csv, gene_csv = _write_analysis_csvs(
         sites, annotations, classification, output_dir, stem="final"
     )
-    print(f"      • final site table: {site_csv}")
+    logger.info("      • final site table: %s", site_csv)
     if gene_csv:
-        print(f"      • gene calls: {gene_csv}")
+        logger.info("      • gene calls: %s", gene_csv)
 
     if args.no_plot:
         return 0
-    print("[3/3] Rendering processed-data map ...")
+    logger.info("[3/3] Rendering processed-data map ...")
     transposon = resolve_transposon("mariner" if args.tpp_mode == "himar1" else "tn5")
     if args.show_candidate_sites and transposon.has_preference:
         insertion_sites = {
@@ -331,16 +391,16 @@ def _run_process(args: argparse.Namespace) -> int:
     out = _render_final_dataset(
         records, insertion_sites, options, plot_output, transposon, sites, classification
     )
-    print(f"Done. Wrote {out}")
+    logger.info("Done. Wrote %s", out)
     return 0
 
 
 def _load_records(reference: Path, name: str | None, no_orf_finder: bool) -> list[GenomeRecord]:
-    print(f"Loading genome from {reference} ...")
+    logger.info("Loading genome from %s ...", reference)
     records = load_genome(reference, name_override=name, call_orfs_if_missing=not no_orf_finder)
     for record in records:
         source = "annotated GenBank" if record.annotation_source == "genbank" else "de-novo ORFs (pyrodigal-gv)"
-        print(f"  • {record.accession}: {record.length:,} bp, {record.n_genes} genes [{source}]")
+        logger.info("  • %s: %s bp, %d genes [%s]", record.accession, f"{record.length:,}", record.n_genes, source)
     return records
 
 
@@ -364,7 +424,7 @@ def _theoretical_sites(
         return {}
     if not transposon.has_preference:
         if not args.no_insertion_sites:
-            print(f"  • {transposon.name}: no finite motif preference; theoretical sites skipped.")
+            logger.info("  • %s: no finite motif preference; theoretical sites skipped.", transposon.name)
         return {}
     sites = {
         record.accession: find_insertion_sites(
@@ -373,7 +433,7 @@ def _theoretical_sites(
         for record in records
     }
     for accession, positions in sites.items():
-        print(f"  • {accession}: {len(positions):,} candidate {transposon.motif} sites")
+        logger.info("  • %s: %s candidate %s sites", accession, f"{len(positions):,}", transposon.motif)
     return sites
 
 
@@ -554,14 +614,34 @@ def _render_final_dataset(
     calls = None
     if classification is not None:
         calls = {(call.contig, call.gene_id): call.final_call for call in classification.calls}
+    return _dispatch_render(
+        records, insertion_sites, options, output, transposon,
+        read_counts=group_counts_for_plotting(sites), gene_calls=calls,
+    )
+
+
+def _dispatch_render(
+    records: list[GenomeRecord],
+    insertion_sites: dict[str, list[int]],
+    options: PlotOptions,
+    output: Path,
+    transposon: Transposon,
+    *,
+    read_counts: dict[str, dict[int, float]] | None = None,
+    gene_calls: dict[tuple[str, str], str | None] | None = None,
+) -> Path:
+    """Render to a static image or an interactive HTML map, picked by extension."""
+    label = _transposon_label(transposon)
+    if Path(output).suffix.lower() in {".html", ".htm"}:
+        from .interactive import render_interactive_html
+
+        return render_interactive_html(
+            records, insertion_sites, options, output, label,
+            read_counts=read_counts, gene_calls=gene_calls,
+        )
     return render(
-        records,
-        insertion_sites,
-        options,
-        output,
-        transposon_label=_transposon_label(transposon),
-        read_counts=group_counts_for_plotting(sites),
-        gene_calls=calls,
+        records, insertion_sites, options, output,
+        transposon_label=label, read_counts=read_counts, gene_calls=gene_calls,
     )
 
 
@@ -570,7 +650,7 @@ def _logging_runner(log_path: Path):
 
     def run(command: tuple[str, ...]) -> None:
         command_text = shlex.join(command)
-        print(f"  $ {command_text}")
+        logger.info("  $ %s", command_text)
         with log_path.open("a", encoding="utf-8") as log:
             log.write(f"\n$ {command_text}\n")
             log.flush()

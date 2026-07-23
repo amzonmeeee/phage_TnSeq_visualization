@@ -20,7 +20,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=7"]
+dev = ["pytest>=7", "plotly>=5"]
+interactive = ["plotly>=5"]
 
 [project.scripts]
 phage-tnseq-viz = "phage_tnseq_viz.cli:main"
