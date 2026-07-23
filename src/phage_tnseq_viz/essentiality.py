@@ -45,6 +45,45 @@ REDUCED_FITNESS = "Reduced fitness"
 AMBIGUOUS = "Ambiguous"
 FURTHER_ANALYSIS = "Further analysis"
 
+# Supplement to the R rules, not part of them: see binomial_min_sites().
+ESSENTIAL_BINOMIAL = "Essential (binomial)"
+
+# Significance level for the binomial short-gene supplement.
+BINOMIAL_ALPHA = 0.05
+
+
+def binomial_min_sites(saturation: float, *, alpha: float = BINOMIAL_ALPHA) -> float | None:
+    """Fewest candidate sites at which "no insertions at all" is significant.
+
+    The R rules give no call to a gene with five or fewer candidate sites, which
+    on a phage genome silences a large share of the annotation: genes are short,
+    so TA sites per gene are few.  Yet a gene with *zero* insertions is the
+    clearest possible essentiality signal, and whether that is surprising depends
+    on how saturated the library is, not on an arbitrary site count.
+
+    Under a Bernoulli model with a library-wide non-insertion probability
+    ``phi = 1 - saturation``, a gene of ``n`` candidate sites is empty by chance
+    with probability ``phi**n``.  Requiring ``phi**n < alpha`` gives the returned
+    threshold ``log(alpha) / log(phi)``; a gene with more sites than that, and no
+    insertions, is essential at that significance level.
+
+    Returns ``None`` when no threshold can exist: a fully saturated library
+    (``phi <= 0``) leaves no empty genes to call, and a library with no
+    insertions at all (``phi >= 1``) makes every gene look empty.
+
+    This follows the supplement Choudhery et al. (2021) added to TRANSIT's Gumbel
+    method, where such genes are reported as ``EB`` alongside Gumbel's ``E``.
+    """
+
+    if not 0.0 <= saturation <= 1.0:
+        raise ValueError(f"saturation must be between 0 and 1: {saturation!r}")
+    if not 0.0 < alpha < 1.0:
+        raise ValueError(f"alpha must be between 0 and 1 (exclusive): {alpha!r}")
+    phi = 1.0 - saturation
+    if phi <= 0.0 or phi >= 1.0:
+        return None
+    return math.log(alpha) / math.log(phi)
+
 
 @dataclass(frozen=True)
 class InsertionSite:
@@ -123,6 +162,10 @@ class GeneClassification:
     ``read_count_median_threshold`` is the pooled positive-count median of *this
     gene's contig* used by the two fitness refinements; it is ``None`` when the
     contig had no positive sites.
+
+    ``binomial_min_sites`` is the site count above which an empty gene on this
+    contig is called ``Essential (binomial)``; it is ``None`` when the supplement
+    is disabled or the contig's saturation admits no threshold.
     """
 
     contig: str
@@ -134,6 +177,7 @@ class GeneClassification:
     initial_call: str | None
     final_call: str | None
     read_count_median_threshold: float | None = None
+    binomial_min_sites: float | None = None
 
 
 @dataclass(frozen=True)
@@ -146,11 +190,20 @@ class ClassificationResult:
     comparable across contigs.  ``read_threshold`` is retained as a convenience
     for the common single-contig dataset (the sole contig's threshold), and is
     ``None`` whenever more than one contig is present.
+
+    ``library_saturation`` and ``binomial_min_sites`` record, per contig, the
+    genic saturation and the site count derived from it by
+    :func:`binomial_min_sites`.  Both are empty when the binomial supplement is
+    disabled.  Saturation is worth reporting on its own: it is the number that
+    decides how much the supplement can recover, and a very low value is the
+    usual sign of an under-sequenced library.
     """
 
     calls: tuple[GeneClassification, ...]
     read_threshold: float | None
     read_thresholds: dict[str, float | None] = field(default_factory=dict)
+    library_saturation: dict[str, float] = field(default_factory=dict)
+    binomial_min_sites: dict[str, float | None] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -238,6 +291,7 @@ def classify_genes(
     sites: Iterable[AnnotatedInsertionSite],
     *,
     classifier: GeneClassifier | None = None,
+    binomial_short_genes: bool = True,
 ) -> ClassificationResult:
     """Classify genes using the audited R workflow or a supplied classifier.
 
@@ -247,18 +301,40 @@ def classify_genes(
     deeper one's would shift the shared median and silently flip fitness calls.
     When ``classifier`` is provided, R statistics and ``initial_call`` are still
     calculated, but its return value replaces every ``final_call``.
+
+    ``binomial_short_genes`` adds the :func:`binomial_min_sites` supplement for
+    genes the R rules leave uncalled.  It only ever fills a ``None`` result, so
+    it cannot change a call the R rules made; set it to ``False`` to reproduce
+    the R script's output exactly.  Saturation is measured per contig, for the
+    same reason the read thresholds are.
     """
 
     groups = _group_sites(sites)
     positive_by_contig: dict[str, list[float]] = {}
+    site_totals: dict[str, int] = {}
+    hit_totals: dict[str, int] = {}
     for (contig, _gene_id), rows in groups.items():
+        site_totals[contig] = site_totals.get(contig, 0) + len(rows)
         for row in rows:
             if row.read_count > 0:
+                hit_totals[contig] = hit_totals.get(contig, 0) + 1
                 positive_by_contig.setdefault(contig, []).append(row.read_count)
     read_thresholds: dict[str, float | None] = {
         contig: _r_quantile(counts, 0.50)
         for contig, counts in positive_by_contig.items()
     }
+
+    # Saturation is summed over genes, matching how the reference implementation
+    # of this supplement derives its library-wide insertion frequency.  Genes are
+    # therefore the denominator, not the whole contig; a site shared by two
+    # overlapping CDSs counts once per gene, as it does everywhere else here.
+    library_saturation: dict[str, float] = {}
+    binomial_thresholds: dict[str, float | None] = {}
+    if binomial_short_genes:
+        for contig, total in site_totals.items():
+            saturation = hit_totals.get(contig, 0) / total if total else 0.0
+            library_saturation[contig] = saturation
+            binomial_thresholds[contig] = binomial_min_sites(saturation)
 
     calls: list[GeneClassification] = []
     for (contig, gene_id), rows in groups.items():
@@ -268,6 +344,16 @@ def classify_genes(
         hits = sum(row.read_count > 0 for row in rows)
         saturation = hits / total_sites
         initial_call, final_call = _r_classify_gene(rows, read_threshold)
+
+        threshold_sites = binomial_thresholds.get(contig)
+        if (
+            binomial_short_genes
+            and final_call is None
+            and hits == 0
+            and threshold_sites is not None
+            and total_sites > threshold_sites
+        ):
+            final_call = ESSENTIAL_BINOMIAL
 
         if classifier is not None:
             try:
@@ -289,6 +375,7 @@ def classify_genes(
                 initial_call=initial_call,
                 final_call=final_call,
                 read_count_median_threshold=read_threshold,
+                binomial_min_sites=threshold_sites,
             )
         )
 
@@ -298,6 +385,8 @@ def classify_genes(
         calls=tuple(calls),
         read_threshold=single_threshold,
         read_thresholds=read_thresholds,
+        library_saturation=library_saturation,
+        binomial_min_sites=binomial_thresholds,
     )
 
 
@@ -606,7 +695,9 @@ def _validate_custom_call(value: object) -> str | None:
 
 __all__ = [
     "AMBIGUOUS",
+    "BINOMIAL_ALPHA",
     "ESSENTIAL",
+    "ESSENTIAL_BINOMIAL",
     "FURTHER_ANALYSIS",
     "INTERMEDIATE",
     "NON_ESSENTIAL",
@@ -622,6 +713,7 @@ __all__ = [
     "InsertionSite",
     "annotate_sites_with_genes",
     "apply_classifier",
+    "binomial_min_sites",
     "classify_genes",
     "consensus_calls",
     "load_classifier",

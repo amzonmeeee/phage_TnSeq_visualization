@@ -173,6 +173,7 @@ def build_process_parser() -> argparse.ArgumentParser:
     final = p.add_argument_group("final data and map")
     final.add_argument("--classifier", default=None, help="Trusted local .py custom classifier exposing classify_gene(gene_id, site_rows).")
     final.add_argument("--no-essentiality", action="store_true", help="Write/plot counts but skip gene essentiality calls.")
+    final.add_argument("--no-binomial-short-genes", action="store_true", help="Disable the binomial supplement, so genes with too few candidate sites for the R rules stay uncalled instead of being tested for zero insertions.")
     final.add_argument("--no-read-histogram", action="store_true", help="Do not draw blue per-site read-count bars.")
     final.add_argument("--read-histogram-cap", type=float, default=None, metavar="PCT", help="Cap the read-histogram scale at this percentile (e.g. 95) of each contig's positive counts; taller bars clip to full height and the scale reads '≥ N'.")
     final.add_argument("--no-plot", action="store_true", help="Write final CSV(s) but do not render an image.")
@@ -210,6 +211,7 @@ def _add_plot_arguments(p: argparse.ArgumentParser) -> None:
     g_data.add_argument("--candidate-model", choices=("auto", "motif", "all-bases", "observed"), default="auto", help="How omitted zero-count candidate sites are completed before classification.")
     g_data.add_argument("--classifier", default=None, help="Trusted local .py custom classifier exposing classify_gene(gene_id, site_rows).")
     g_data.add_argument("--no-essentiality", action="store_true", help="Do not call/colour gene essentiality.")
+    g_data.add_argument("--no-binomial-short-genes", action="store_true", help="Disable the binomial supplement, so genes with too few candidate sites for the R rules stay uncalled instead of being tested for zero insertions.")
     g_data.add_argument("--no-read-histogram", action="store_true", help="Do not draw the blue per-site count histogram.")
     g_data.add_argument("--read-histogram-cap", type=float, default=None, metavar="PCT", help="Cap the read-histogram scale at this percentile (e.g. 95) of each contig's positive counts, so one hypersaturated site does not squash the rest; taller bars clip to full height and the scale reads '≥ N'.")
     g_data.add_argument("--csv-dir", default=None, help="Directory for normalised final-site and gene-call CSV outputs.")
@@ -284,7 +286,11 @@ def _run_plot(args: argparse.Namespace) -> int:
         )
 
     annotations, result = _annotate_and_classify(
-        records, sites, classifier_path=args.classifier, skip_essentiality=args.no_essentiality
+        records,
+        sites,
+        classifier_path=args.classifier,
+        skip_essentiality=args.no_essentiality,
+        binomial_short_genes=not args.no_binomial_short_genes,
     )
     csv_dir = Path(args.csv_dir) if args.csv_dir else (output.parent if output.parent != Path("") else Path("."))
     site_csv, gene_csv = _write_analysis_csvs(
@@ -359,7 +365,11 @@ def _run_process(args: argparse.Namespace) -> int:
     records = _load_records(reference, None, False)
     sites = final_sites_from_counts(counts)
     annotations, classification = _annotate_and_classify(
-        records, sites, classifier_path=args.classifier, skip_essentiality=args.no_essentiality
+        records,
+        sites,
+        classifier_path=args.classifier,
+        skip_essentiality=args.no_essentiality,
+        binomial_short_genes=not args.no_binomial_short_genes,
     )
     site_csv, gene_csv = _write_analysis_csvs(
         sites, annotations, classification, output_dir, stem="final"
@@ -530,6 +540,7 @@ def _annotate_and_classify(
     *,
     classifier_path: str | None,
     skip_essentiality: bool,
+    binomial_short_genes: bool = True,
 ) -> tuple[list[AnnotatedInsertionSite], ClassificationResult | None]:
     records = list(records)
     sites = list(sites)
@@ -555,7 +566,9 @@ def _annotate_and_classify(
             raise ValueError("--classifier cannot be combined with --no-essentiality")
         return annotations, None
     classifier = load_classifier(classifier_path) if classifier_path else None
-    return annotations, classify_genes(annotations, classifier=classifier)
+    return annotations, classify_genes(
+        annotations, classifier=classifier, binomial_short_genes=binomial_short_genes
+    )
 
 
 def _write_analysis_csvs(
@@ -579,6 +592,7 @@ def _write_analysis_csvs(
         fields = [
             "contig", "gene_id", "strand", "total_candidate_sites", "hit_sites",
             "saturation", "initial_call", "final_call", "read_count_median_threshold",
+            "binomial_min_sites",
         ]
         import csv
 
@@ -586,6 +600,7 @@ def _write_analysis_csvs(
         writer.writeheader()
         for call in classification.calls:
             threshold = call.read_count_median_threshold
+            min_sites = call.binomial_min_sites
             writer.writerow(
                 {
                     "contig": call.contig,
@@ -597,6 +612,7 @@ def _write_analysis_csvs(
                     "initial_call": call.initial_call or "",
                     "final_call": call.final_call or "",
                     "read_count_median_threshold": "" if threshold is None else f"{threshold:g}",
+                    "binomial_min_sites": "" if min_sites is None else f"{min_sites:.2f}",
                 }
             )
     return site_path, gene_path

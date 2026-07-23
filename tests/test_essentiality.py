@@ -9,6 +9,7 @@ import pytest
 from phage_tnseq_viz.essentiality import (
     AMBIGUOUS,
     ESSENTIAL,
+    ESSENTIAL_BINOMIAL,
     FURTHER_ANALYSIS,
     INTERMEDIATE,
     NON_ESSENTIAL,
@@ -20,6 +21,7 @@ from phage_tnseq_viz.essentiality import (
     InsertionSite,
     annotate_sites_with_genes,
     apply_classifier,
+    binomial_min_sites,
     classify_genes,
     consensus_calls,
     load_classifier,
@@ -236,3 +238,111 @@ def test_custom_classifier_requires_the_documented_callable(tmp_path) -> None:
 
     with pytest.raises(ValueError, match="classify_gene"):
         load_classifier(bad_path)
+
+
+def _saturated_library() -> list[AnnotatedInsertionSite]:
+    """A 74.5%-saturated contig, giving a binomial threshold of ~2.19 sites.
+
+    Genes are sized to straddle that threshold: ``short_empty`` clears it,
+    ``tiny_empty`` does not, and the two genes the R rules already call are
+    present to prove the supplement leaves them alone.
+    """
+
+    return (
+        _annotated_rows("big", "+", [10.0] * 38 + [0.0] * 2, start=1)
+        + _annotated_rows("long_empty", "+", [0.0] * 6, start=100)
+        + _annotated_rows("short_empty", "+", [0.0] * 3, start=200)
+        + _annotated_rows("tiny_empty", "+", [0.0] * 2, start=300)
+    )
+
+
+def test_binomial_threshold_is_the_site_count_at_which_an_empty_gene_is_significant() -> None:
+    # phi**n < 0.05, i.e. n > log(0.05)/log(phi).
+    assert binomial_min_sites(0.8) == pytest.approx(1.8614, abs=1e-4)
+    assert binomial_min_sites(0.5) == pytest.approx(4.3219, abs=1e-4)
+    assert binomial_min_sites(0.2) == pytest.approx(13.4251, abs=1e-4)
+    # A stricter alpha demands more sites before an empty gene is convincing.
+    assert binomial_min_sites(0.5, alpha=0.01) > binomial_min_sites(0.5, alpha=0.05)
+
+
+def test_binomial_threshold_is_undefined_for_fully_and_never_saturated_libraries() -> None:
+    assert binomial_min_sites(1.0) is None  # no empty genes exist to call
+    assert binomial_min_sites(0.0) is None  # every gene looks empty
+
+
+def test_binomial_supplement_calls_short_empty_genes_the_r_rules_leave_uncalled() -> None:
+    calls = _calls_by_gene(_saturated_library())
+
+    # Three empty sites are unlikely at this saturation, so the gene is called
+    # even though the R rules need more than five sites before deciding.
+    assert calls["short_empty"].total_sites == 3
+    assert calls["short_empty"].initial_call is None
+    assert calls["short_empty"].final_call == ESSENTIAL_BINOMIAL
+
+    # Two empty sites are not yet surprising, so it stays uncalled.
+    assert calls["tiny_empty"].final_call is None
+
+
+def test_binomial_supplement_never_replaces_a_call_the_r_rules_made() -> None:
+    calls = _calls_by_gene(_saturated_library())
+
+    assert calls["long_empty"].final_call == ESSENTIAL  # saturation 0 < 0.2
+    assert calls["big"].final_call == NON_ESSENTIAL  # saturation 0.95 > 0.8
+
+
+def test_binomial_supplement_stays_silent_in_a_sparse_library() -> None:
+    """The same 3-site empty gene is unremarkable when few sites are hit anywhere."""
+
+    rows = (
+        _annotated_rows("big", "+", [10.0] * 5 + [0.0] * 35, start=1)
+        + _annotated_rows("short_empty", "+", [0.0] * 3, start=200)
+    )
+
+    result = classify_genes(rows)
+    calls = {call.gene_id: call for call in result.calls}
+
+    assert result.library_saturation["ctg"] == pytest.approx(5 / 43)
+    assert calls["short_empty"].final_call is None
+
+
+def test_binomial_supplement_ignores_short_genes_that_have_insertions() -> None:
+    rows = (
+        _annotated_rows("big", "+", [10.0] * 38 + [0.0] * 2, start=1)
+        + _annotated_rows("short_hit", "+", [0.0, 7.0, 0.0], start=200)
+    )
+
+    calls = {call.gene_id: call for call in classify_genes(rows).calls}
+
+    assert calls["short_hit"].hits == 1
+    assert calls["short_hit"].final_call is None
+
+
+def test_binomial_supplement_can_be_switched_off_to_reproduce_the_r_script() -> None:
+    rows = _saturated_library()
+
+    disabled = {call.gene_id: call for call in classify_genes(rows, binomial_short_genes=False).calls}
+    enabled = {call.gene_id: call for call in classify_genes(rows).calls}
+
+    assert disabled["short_empty"].final_call is None
+    assert disabled["short_empty"].binomial_min_sites is None
+    assert enabled["short_empty"].final_call == ESSENTIAL_BINOMIAL
+    # Every other call is identical either way.
+    assert {gene: call.final_call for gene, call in disabled.items() if gene != "short_empty"} == {
+        gene: call.final_call for gene, call in enabled.items() if gene != "short_empty"
+    }
+
+
+def test_binomial_threshold_is_reported_per_contig_alongside_saturation() -> None:
+    result = classify_genes(_saturated_library())
+
+    assert result.library_saturation["ctg"] == pytest.approx(38 / 51)
+    assert result.binomial_min_sites["ctg"] == pytest.approx(2.1917, abs=1e-4)
+    assert all(call.binomial_min_sites == result.binomial_min_sites["ctg"] for call in result.calls)
+
+
+def test_custom_classifier_still_overrides_the_binomial_supplement() -> None:
+    rows = _saturated_library()
+
+    result = classify_genes(rows, classifier=lambda gene_id, site_rows: "mine")
+
+    assert {call.final_call for call in result.calls} == {"mine"}

@@ -60,6 +60,7 @@ DEFAULT_CATEGORY = "unknown function"
 # ramp so "no data" is never mistaken for a fitness level.
 ESSENTIALITY_COLORS: dict[str, str] = {
     "Essential": "#800026",              # dark red (maroon)
+    "Essential (binomial)": "#bd0026",   # the next ramp step, so it reads as essential
     "Strong fitness defect": "#e31a1c",  # red
     "Intermediate": "#fd8d3c",           # orange
     "Reduced fitness": "#fed330",        # amber (golden yellow)
@@ -71,6 +72,7 @@ ESSENTIALITY_COLORS: dict[str, str] = {
 
 ESSENTIALITY_LABELS: dict[str, str] = {
     "Essential": "Essential",
+    "Essential (binomial)": "Essential — binomial (short gene, no insertions)",
     "Strong fitness defect": "Strong fitness defect",
     "Intermediate": "Intermediate",
     "Reduced fitness": "Reduced fitness",

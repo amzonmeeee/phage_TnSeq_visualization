@@ -282,7 +282,7 @@ overlapping CDS.
 
 | Rule | Built-in call |
 |---|---|
-| ≤5 candidate sites in a gene | No R call (`Insufficient sites` on map) |
+| ≤5 candidate sites in a gene | No R call (`Insufficient sites` on map, unless the binomial supplement applies) |
 | Saturation `< 0.20` | Essential |
 | Saturation `> 0.80` | Non-essential |
 | Otherwise | Strand-aware 3′-bias and first/second-half domain checks → Essential or Intermediate |
@@ -290,11 +290,42 @@ overlapping CDS.
 | Saturation 0.70–0.80; >50% positive sites above that median | Reduced fitness (unless Essential) |
 
 Saturation is `positive candidate sites / all candidate sites`. Arrow fills use
-maroon (Essential), red (Strong fitness defect), orange (Intermediate),
-amber (Reduced fitness), cream (Non-essential), and grey for
-insufficient/ambiguous calls. Arrow borders continue to use the phold/pharokka
-PHROG functional-category palette, so functional annotation and fitness call
-remain independently readable.
+maroon (Essential), bright red (Essential — binomial), red (Strong fitness
+defect), orange (Intermediate), amber (Reduced fitness), cream (Non-essential),
+and grey for insufficient/ambiguous calls. Arrow borders continue to use the
+phold/pharokka PHROG functional-category palette, so functional annotation and
+fitness call remain independently readable.
+
+### The binomial supplement for short genes
+
+The R rules refuse to call any gene with five or fewer candidate sites. On a
+phage genome that silences a real share of the annotation, because genes are
+short and TA sites are sparse — especially in GC-rich phages, where a 200 bp ORF
+may hold only three or four TA sites. Yet a gene with *no* insertions at all is
+the clearest essentiality signal there is, and whether that is surprising depends
+on how saturated the library is rather than on a fixed site count.
+
+So a gene the R rules leave uncalled is re-examined: with a library-wide
+non-insertion probability `phi = 1 - saturation`, a gene of `n` candidate sites
+is empty by chance with probability `phi**n`. When that is below 0.05 — that is,
+when `n > log(0.05)/log(phi)` — the gene is called **`Essential (binomial)`**.
+The threshold is reported per contig in the `binomial_min_sites` column of the
+gene CSV, so every such call can be checked by hand.
+
+This is a supplement, not a replacement: it only ever fills a result the R rules
+left empty, and can never change a call they made. It follows the binomial
+addition Choudhery et al. made to TRANSIT's Gumbel method<sup>2</sup>, where these
+genes are reported as `EB` alongside Gumbel's `E`. It scales with library
+quality by construction — a well-saturated library recovers genes down to two or
+three sites, while a sparse one recovers none, which is the conservative and
+correct outcome.
+
+Turn it off with `--no-binomial-short-genes` to reproduce the R script exactly:
+
+```bash
+phage-tnseq-viz plot reference.gbk --final-dataset final.csv \
+  --no-binomial-short-genes
+```
 
 ### Write a custom classifier
 
@@ -346,6 +377,7 @@ pytest
 ## References
 
 1. Humolli D, Ransome J, Piel D, Veening JW, Harms A. Systematic mapping of bacteriophage gene essentiality with HIDEN‑SEQ. _bioRxiv (Cold Spring Harbor Laboratory)_. Published online November 20, 2025. doi:10.1101/2025.11.20.689424
+2. Choudhery S, Brown AJ, Akusobi C, Rubin EJ, Sassetti CM, Ioerger TR. Modeling site-specific nucleotide biases affecting Himar1 transposon insertion frequencies in TnSeq data sets. _mSystems_. 2021;6(5):e00876-21. doi:10.1128/mSystems.00876-21
 
 ## Citation
 
