@@ -274,6 +274,41 @@ per subsample and the final CSV reports their mean and population standard
 deviation. The maps remain separate because phage genome coordinates are not
 assumed to be alignable.
 
+### TTR normalization (an alternative to subsampling)
+
+Subsampling makes libraries comparable by throwing reads away until they share a
+depth. `--normalize ttr` reaches the same goal without discarding anything: it
+rescales each contig so its typical non-zero count meets a fixed target (default
+100), so a library run entirely on its own still lands on the same scale as any
+other.
+
+```bash
+phage-tnseq-viz plot phage_A.gbk --final-dataset A_final.csv -o A.png --normalize ttr
+phage-tnseq-viz plot phage_B.gbk --final-dataset B_final.csv -o B.png --normalize ttr
+```
+
+The factor is `target / (density × trimmed_mean_of_hit_sites)`, dropping the top
+and bottom 5% of non-zero counts before averaging so a few hypersaturated sites
+cannot set the scale for the whole library. This is TRANSIT's default (TTR =
+Trimmed Total Reads), available on both the `plot` and `process` paths and
+computed per contig, since phage contigs are not sequenced to comparable depths.
+Change the target with `--norm-target`.
+
+Two things are worth being clear about:
+
+- **It never changes a within-library call.** Scaling a whole contig by one
+  number leaves saturation untouched and moves every count together, so the
+  essentiality calls are identical with or without it. Its effect is entirely on
+  *cross*-library comparability and on the read-count scale of the map.
+- **QC still reports raw counts.** Normalization pins the non-zero mean to the
+  target, which would otherwise hide the low-`NZmean` signature of an
+  under-sequenced library, so the QC table is always computed before scaling.
+  The normalized value goes in the `read_count` column and the original is kept
+  in `raw_read_count`.
+
+TTR corrects for depth only. It does not fix a position-dependent coverage
+gradient or a genuinely different insertion-site distribution between libraries.
+
 ## Library quality control
 
 Every essentiality call rests on assumptions about the library: that enough

@@ -49,7 +49,7 @@ from .pipeline import (
     run_pipeline,
 )
 from .plot import PAPER_SIZES, PlotOptions, render
-from . import qc
+from . import normalize, qc
 from .transposon import PRESETS, Transposon, find_insertion_sites, resolve_transposon
 
 
@@ -173,6 +173,8 @@ def build_process_parser() -> argparse.ArgumentParser:
     subsampling.add_argument("--observed-sites-only", action="store_true", help="Do not add zero-count candidate sites (not recommended for essentiality).")
 
     final = p.add_argument_group("final data and map")
+    final.add_argument("--normalize", choices=("none", "ttr"), default="none", help="Rescale counts so libraries are comparable without discarding reads. 'ttr' is TRANSIT's Trimmed Total Reads; QC still reports raw counts.")
+    final.add_argument("--norm-target", type=float, default=100.0, help="Target typical non-zero count that TTR normalization scales each contig to.")
     final.add_argument("--classifier", default=None, help="Trusted local .py custom classifier exposing classify_gene(gene_id, site_rows).")
     final.add_argument("--no-essentiality", action="store_true", help="Write/plot counts but skip gene essentiality calls.")
     final.add_argument("--no-gap-analysis", action="store_true", help="Skip the gap analysis, so no longest-empty-run statistics or domain-essential flags are reported.")
@@ -211,6 +213,8 @@ def _add_plot_arguments(p: argparse.ArgumentParser) -> None:
 
     g_data = p.add_argument_group("processed final dataset")
     g_data.add_argument("--final-dataset", default=None, help="CSV final-site table; bypasses all built-in raw-read processing.")
+    g_data.add_argument("--normalize", choices=("none", "ttr"), default="none", help="Rescale counts so libraries are comparable without discarding reads. 'ttr' is TRANSIT's Trimmed Total Reads; QC still reports raw counts.")
+    g_data.add_argument("--norm-target", type=float, default=100.0, help="Target typical non-zero count that TTR normalization scales each contig to.")
     g_data.add_argument("--candidate-model", choices=("auto", "motif", "all-bases", "observed"), default="auto", help="How omitted zero-count candidate sites are completed before classification.")
     g_data.add_argument("--classifier", default=None, help="Trusted local .py custom classifier exposing classify_gene(gene_id, site_rows).")
     g_data.add_argument("--no-essentiality", action="store_true", help="Do not call/colour gene essentiality.")
@@ -289,6 +293,8 @@ def _run_plot(args: argparse.Namespace) -> int:
             "all-bases candidate model adapts a TA-site classifier; validate it for your transposon."
         )
 
+    raw_sites = sites
+    sites = _normalize_sites(sites, args.normalize, args.norm_target)
     annotations, result = _annotate_and_classify(
         records,
         sites,
@@ -299,7 +305,7 @@ def _run_plot(args: argparse.Namespace) -> int:
     )
     csv_dir = Path(args.csv_dir) if args.csv_dir else (output.parent if output.parent != Path("") else Path("."))
     site_csv, gene_csv, qc_csv = _write_analysis_csvs(
-        sites, annotations, result, csv_dir, stem=output.stem
+        sites, annotations, result, csv_dir, stem=output.stem, qc_sites=raw_sites
     )
     out = _render_final_dataset(
         records, insertion_sites, options, output, transposon, sites, result
@@ -369,7 +375,8 @@ def _run_process(args: argparse.Namespace) -> int:
 
     logger.info("[2/3] Annotating final insertion sites and calling essentiality ...")
     records = _load_records(reference, None, False)
-    sites = final_sites_from_counts(counts)
+    raw_sites = final_sites_from_counts(counts)
+    sites = _normalize_sites(raw_sites, args.normalize, args.norm_target)
     annotations, classification = _annotate_and_classify(
         records,
         sites,
@@ -379,7 +386,7 @@ def _run_process(args: argparse.Namespace) -> int:
         gap_analysis=not args.no_gap_analysis,
     )
     site_csv, gene_csv, qc_csv = _write_analysis_csvs(
-        sites, annotations, classification, output_dir, stem="final"
+        sites, annotations, classification, output_dir, stem="final", qc_sites=raw_sites
     )
     logger.info("      • final site table: %s", site_csv)
     if gene_csv:
@@ -583,6 +590,50 @@ def _annotate_and_classify(
     )
 
 
+def _normalize_sites(
+    sites: list[FinalSite], method: str, target: float
+) -> list[FinalSite]:
+    """Return TTR-normalized sites, or the input unchanged when method is 'none'.
+
+    The pre-normalization count is preserved in ``raw_read_count`` when that
+    field is not already carrying an earlier raw value, so the CSV keeps both.
+    Standard deviations scale with the counts; ``n_subsamples`` does not.
+    """
+    if method == "none":
+        return list(sites)
+    if method != "ttr":  # pragma: no cover - argparse restricts the choices
+        raise ValueError(f"unknown normalization method: {method!r}")
+
+    factors = normalize.normalize_by_contig(
+        ((site.contig, site.read_count) for site in sites), target=target
+    )
+    for contig in sorted(factors):
+        norm = factors[contig]
+        if norm.factor is None:
+            logger.warning(
+                "TTR normalization (%s): no positive counts to scale; left unchanged", contig
+            )
+        else:
+            logger.info(
+                "      TTR %s: x%.3f (saturation %.3f, trimmed NZ mean %.1f -> target %g)",
+                contig, norm.factor, norm.density, norm.trimmed_mean, norm.target,
+            )
+
+    scaled: list[FinalSite] = []
+    for site in sites:
+        factor = factors[site.contig].factor
+        sd = site.read_count_sd
+        scaled.append(
+            replace(
+                site,
+                read_count=normalize.apply_factor(site.read_count, factor),
+                raw_read_count=site.raw_read_count if site.raw_read_count is not None else site.read_count,
+                read_count_sd=None if sd is None else normalize.apply_factor(sd, factor),
+            )
+        )
+    return scaled
+
+
 def _write_qc(sites: Iterable[FinalSite], output_dir: Path, *, stem: str) -> Path:
     """Write the library QC table and report it, warnings first.
 
@@ -631,6 +682,7 @@ def _write_analysis_csvs(
     output_dir: Path,
     *,
     stem: str,
+    qc_sites: Iterable[FinalSite] | None = None,
 ) -> tuple[Path, Path | None, Path]:
     output_dir.mkdir(parents=True, exist_ok=True)
     assignments = {
@@ -638,7 +690,9 @@ def _write_analysis_csvs(
         for site in annotations
     }
     site_path = write_final_dataset(output_dir / f"{stem}_sites.csv", sites, gene_assignments=assignments)
-    qc_path = _write_qc(sites, output_dir, stem=stem)
+    # QC runs on raw counts: TTR pins the non-zero mean to its target, which would
+    # otherwise hide the low-NZmean signal of an under-sequenced library.
+    qc_path = _write_qc(qc_sites if qc_sites is not None else sites, output_dir, stem=stem)
     if classification is None:
         return site_path, None, qc_path
     gene_path = output_dir / f"{stem}_gene_essentiality.csv"
